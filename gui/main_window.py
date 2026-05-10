@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 import settings as cfg
-import parser as prs
+import line_parser as prs
 from data_store import TestData
 from serial_worker import SerialWorker
 from calculations import (

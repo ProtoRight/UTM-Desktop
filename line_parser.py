@@ -27,29 +27,29 @@ class ParsedLine:
 
 
 # Canonical event tags returned in ParsedLine.event
-EVT_BOOT       = "BOOT_OK"
-EVT_IDLE       = "STATE_IDLE"
-EVT_RUN_3PT    = "STATE_RUN_3PT"
-EVT_RUN_T      = "STATE_RUN_T"
-EVT_FINISHED   = "STATE_FINISHED"
-EVT_ESTOP      = "STATE_ESTOP"
-EVT_TARED      = "INFO_TARED"
-EVT_ZEROED     = "INFO_ZEROED"
+EVT_BOOT         = "BOOT_OK"
+EVT_IDLE         = "STATE_IDLE"
+EVT_RUN_3PT      = "STATE_RUN_3PT"
+EVT_RUN_T        = "STATE_RUN_T"
+EVT_FINISHED     = "STATE_FINISHED"
+EVT_ESTOP        = "STATE_ESTOP"
+EVT_TARED        = "INFO_TARED"
+EVT_ZEROED       = "INFO_ZEROED"
 EVT_ABORT_TRAVEL = "ABORT_TRAVEL"
 EVT_ABORT_LOAD   = "ABORT_LOAD"
-EVT_JOGSPEED   = "INFO_JOGSPEED"
+EVT_JOGSPEED     = "INFO_JOGSPEED"
 
 _EVENT_MAP = {
-    "BOOT OK":                              EVT_BOOT,
-    "IDLE":                                 EVT_IDLE,
-    "3 POINT BEND TEST STARTING":           EVT_RUN_3PT,
-    "TENSILE TEST STARTING":                EVT_RUN_T,
-    "COMMANDED TO FINISH":                  EVT_FINISHED,
+    "BOOT OK":                                EVT_BOOT,
+    "IDLE":                                   EVT_IDLE,
+    "3 POINT BEND TEST STARTING":             EVT_RUN_3PT,
+    "TENSILE TEST STARTING":                  EVT_RUN_T,
+    "COMMANDED TO FINISH":                    EVT_FINISHED,
     "TESTING ABORTED - TRAVEL LIMIT REACHED": EVT_ABORT_TRAVEL,
-    "TESTING ABORTED - LOAD LIMIT REACHED": EVT_ABORT_LOAD,
-    "ESTOP PRESSED - ALL MOTORS DISABLED":  EVT_ESTOP,
-    "SCALE TARED":                          EVT_TARED,
-    "DRO ZERO COMMAND SENT":                EVT_ZEROED,
+    "TESTING ABORTED - LOAD LIMIT REACHED":   EVT_ABORT_LOAD,
+    "ESTOP PRESSED - ALL MOTORS DISABLED":    EVT_ESTOP,
+    "SCALE TARED":                            EVT_TARED,
+    "DRO ZERO COMMAND SENT":                  EVT_ZEROED,
 }
 
 
