@@ -21,13 +21,15 @@ from calculations import (
     SpecimenData, calculate_bend, calculate_tensile,
 )
 
-from gui.connection_bar  import ConnectionBar
-from gui.control_panel   import ControlPanel
-from gui.live_graph      import LiveGraph
-from gui.results_panel   import ResultsPanel
-from gui.serial_log      import SerialLog
-from gui.specimen_panel  import SpecimenPanel
-from gui.settings_panel  import SettingsPanel
+from gui.connection_bar       import ConnectionBar
+from gui.control_panel        import ControlPanel
+from gui.live_graph           import LiveGraph
+from gui.results_panel        import ResultsPanel
+from gui.serial_log           import SerialLog
+from gui.specimen_panel       import SpecimenPanel
+from gui.settings_panel       import SettingsPanel
+from gui.load_display         import LoadDisplay
+from gui.displacement_display import DisplacementDisplay
 
 
 class MainWindow(QMainWindow):
@@ -35,7 +37,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("UTM Desktop")
-        self.setMinimumSize(1280, 780)
+        self.setMinimumSize(1100, 720)
 
         self._worker: Optional[SerialWorker] = None
         self._test_data = TestData()
@@ -46,7 +48,7 @@ class MainWindow(QMainWindow):
         cfg.load()
         self._build_ui()
 
-        # Graph refresh timer (200 ms matches Arduino sample rate)
+        # Graph refresh timer — 200 ms matches Arduino sample rate
         self._graph_timer = QTimer(self)
         self._graph_timer.setInterval(200)
         self._graph_timer.timeout.connect(self._refresh_graph)
@@ -62,42 +64,42 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 4)
         root.setSpacing(6)
 
-        # --- connection bar (top) ---
+        # Connection bar (top)
         self._conn_bar = ConnectionBar()
         self._conn_bar.connect_requested.connect(self._on_connect)
         self._conn_bar.disconnect_requested.connect(self._on_disconnect)
         root.addWidget(self._conn_bar)
 
-        # --- main content splitter ---
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # Main content — horizontal splitter (left panel | right content)
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.setChildrenCollapsible(False)
 
-        left = self._build_left_panel()
-        splitter.addWidget(left)
+        self._main_splitter.addWidget(self._build_left_panel())
+        self._main_splitter.addWidget(self._build_right_panel())
+        self._main_splitter.setSizes([340, 960])
+        self._main_splitter.setStretchFactor(0, 0)
+        self._main_splitter.setStretchFactor(1, 1)
+        root.addWidget(self._main_splitter, 1)
 
-        right = self._build_right_panel()
-        splitter.addWidget(right)
-
-        splitter.setSizes([330, 950])
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, 1)
-
-        # --- serial log (bottom) ---
+        # Serial log (bottom)
         self._serial_log = SerialLog()
+        self._serial_log.command_entered.connect(self._send)
         root.addWidget(self._serial_log)
 
     # ------------------------------------------------------------------
     def _build_left_panel(self) -> QWidget:
+        """Scrollable left panel: controls → live displays → specimen → settings."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFixedWidth(335)
+        scroll.setMinimumWidth(260)    # resizable via splitter — no fixed width
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
 
+        # Controls
         self._ctrl = ControlPanel()
         self._ctrl.cmd_run_3pt.connect(lambda: self._send_test("3PT"))
         self._ctrl.cmd_run_t.connect(lambda: self._send_test("TENSILE"))
@@ -107,11 +109,25 @@ class MainWindow(QMainWindow):
         self._ctrl.cmd_jog_speed.connect(
             lambda v: self._send(f"JOGSPEED {v:.1f}")
         )
+        self._ctrl.cmd_idle.connect(lambda: self._send("IDLE"))
+        self._ctrl.cmd_raw.connect(lambda: self._send("RAW"))
+        self._ctrl.cmd_cal.connect(lambda: self._send("CAL"))
         layout.addWidget(self._ctrl)
 
+        # Live instrument displays (side-by-side to save vertical space)
+        disp_row = QHBoxLayout()
+        self._load_display = LoadDisplay()
+        self._load_display.setMinimumHeight(220)
+        self._disp_display = DisplacementDisplay()
+        disp_row.addWidget(self._load_display)
+        disp_row.addWidget(self._disp_display)
+        layout.addLayout(disp_row)
+
+        # Specimen info
         self._specimen = SpecimenPanel()
         layout.addWidget(self._specimen)
 
+        # Test settings
         self._settings = SettingsPanel()
         layout.addWidget(self._settings)
 
@@ -120,17 +136,21 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _build_right_panel(self) -> QWidget:
+        """Right panel: graph area (with instrument strip) above results."""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
+        # Graph takes the top, expanding portion
         self._graph = LiveGraph()
         layout.addWidget(self._graph, 1)
 
+        # Results panel (fixed height below graph)
         self._results = ResultsPanel()
         self._results.export_requested.connect(self._on_export_csv)
-        self._results.setFixedHeight(240)
+        self._results.recalculate_requested.connect(self._on_recalculate)
+        self._results.setFixedHeight(230)
         layout.addWidget(self._results)
 
         return w
@@ -155,7 +175,6 @@ class MainWindow(QMainWindow):
         self._graph_timer.stop()
         self._ctrl.set_connected(False)
         self._conn_bar.set_connected(False)
-        self._conn_bar.set_arduino_verified(False)
 
     def _on_connection_changed(self, connected: bool) -> None:
         self._conn_bar.set_connected(connected)
@@ -163,7 +182,6 @@ class MainWindow(QMainWindow):
             self._machine_state = "IDLE"
             self._ctrl.set_connected(True)
             self._ctrl.set_idle()
-            self._conn_bar.set_arduino_verified(False)
         else:
             self._machine_state = "DISCONNECTED"
             self._ctrl.set_connected(False)
@@ -183,34 +201,36 @@ class MainWindow(QMainWindow):
 
     def _on_line(self, line: str) -> None:
         self._serial_log.append(line)
-
         parsed = prs.parse_line(line)
 
-        # Verify Arduino on first meaningful line
+        # First valid line confirms Arduino identity
         if not self._arduino_verified and (parsed.reading or parsed.event):
             self._arduino_verified = True
             self._conn_bar.set_arduino_verified(True)
 
-        # Handle readings
         if parsed.reading:
             r = parsed.reading
-            if r.motor_enabled is not None:
-                self._ctrl.update_motor_state(r.motor_enabled)
-            if r.jog_speed is not None:
-                self._ctrl.set_jog_speed_display(r.jog_speed)
-
+            # Update live instrument displays
+            self._load_display.update_load(r.load)
+            self._disp_display.update_displacement(r.displacement)
+            # Update connection bar text readouts
             self._conn_bar.update_live(r.displacement, r.load, self._machine_state)
 
-            # Record data during a test run
+            # Update motor state indicator (only present in IDLE output)
+            if r.motor_enabled is not None:
+                self._ctrl.update_motor_state(r.motor_enabled)
+            # NOTE: jog speed from Arduino is NOT synced to the spinbox —
+            # the spinbox shows what the user wants to SEND, not the current state.
+
+            # Accumulate test data while running
             if self._machine_state in ("RUNNING_3PT", "RUNNING_T"):
                 self._test_data.add_point(r.displacement, r.load)
-                self._check_completion_conditions(r.displacement, r.load)
+                self._check_completion_conditions()
 
-        # Handle state events
         if parsed.event:
-            self._handle_event(parsed.event, line)
+            self._handle_event(parsed.event)
 
-    def _handle_event(self, event: str, raw_line: str) -> None:
+    def _handle_event(self, event: str) -> None:
         if event == prs.EVT_BOOT:
             self._machine_state = "IDLE"
             self._ctrl.set_idle()
@@ -219,6 +239,7 @@ class MainWindow(QMainWindow):
             self._machine_state = "IDLE"
             self._ctrl.set_idle()
             self._graph_timer.stop()
+            self._conn_bar.set_estop(False)
 
         elif event == prs.EVT_RUN_3PT:
             self._machine_state = "RUNNING_3PT"
@@ -238,32 +259,23 @@ class MainWindow(QMainWindow):
             self._graph_timer.stop()
             self._ctrl.set_connected(True)
             self._ctrl.set_idle()
-            self._ctrl.set_running(False)
             self._conn_bar.set_estop(True)
             if not self._test_data.is_empty():
                 self._on_test_complete("estop")
-
-        elif event == prs.EVT_TARED:
-            pass  # acknowledged in serial log
-
-        elif event == prs.EVT_ZEROED:
-            pass
 
     # ------------------------------------------------------------------
     # Completion detection (software-side)
     # ------------------------------------------------------------------
 
-    def _check_completion_conditions(self, disp: float, load: float) -> None:
+    def _check_completion_conditions(self) -> None:
         s = self._settings
         reason: Optional[str] = None
-
         if self._test_data.check_travel_limit(s.travel_limit_mm):
             reason = "travel"
         elif self._test_data.check_load_limit(s.load_limit_kg):
             reason = "load"
         elif self._test_data.check_load_drop(s.load_drop_pct, s.load_drop_window):
             reason = "drop"
-
         if reason:
             self._send("STOP")
             self._on_test_complete(reason)
@@ -271,7 +283,6 @@ class MainWindow(QMainWindow):
     def _on_test_complete(self, reason: str) -> None:
         if self._machine_state not in ("RUNNING_3PT", "RUNNING_T"):
             return
-
         was_3pt = self._machine_state == "RUNNING_3PT"
         self._machine_state = "FINISHED"
         self._test_data.completion_reason = reason
@@ -279,16 +290,26 @@ class MainWindow(QMainWindow):
         self._ctrl.set_idle()
         self._conn_bar.set_estop(False)
 
-        # Final graph refresh and completion marker
+        # Final graph refresh + completion marker
         disp_list = self._test_data.displacements()
         load_list  = self._test_data.loads()
         self._graph.update_data(disp_list, load_list)
         if disp_list:
             self._graph.mark_completion(disp_list[-1], load_list[-1])
 
-        # Calculate and display results
+        # Run calculations and show results
         specimen = self._specimen.get_specimen_data()
-        if was_3pt:
+        self._run_calculations(was_3pt, specimen, disp_list, load_list)
+        self._results.enable_recalculate(True)
+
+    def _run_calculations(
+        self,
+        is_3pt: bool,
+        specimen: SpecimenData,
+        disp_list: list[float],
+        load_list: list[float],
+    ) -> None:
+        if is_3pt:
             results = calculate_bend(disp_list, load_list, specimen)
             self._results.show_bend_results(results)
         else:
@@ -296,7 +317,7 @@ class MainWindow(QMainWindow):
             self._results.show_tensile_results(results)
 
     # ------------------------------------------------------------------
-    # Graph refresh (on timer)
+    # Graph refresh (timer-driven)
     # ------------------------------------------------------------------
 
     def _refresh_graph(self) -> None:
@@ -310,25 +331,53 @@ class MainWindow(QMainWindow):
     # ==================================================================
 
     def _send_test(self, test_type: str) -> None:
-        """Clear previous data, update graph title, send run command."""
         self._test_data.clear()
         self._results.clear()
         self._graph.clear()
 
         specimen = self._specimen.get_specimen_data()
         label = "3-Point Bend" if test_type == "3PT" else "Tensile"
-        title_parts = [label]
+        parts = [label]
         if specimen.sample_id:
-            title_parts.append(specimen.sample_id)
+            parts.append(specimen.sample_id)
         if specimen.material:
-            title_parts.append(specimen.material)
-        self._graph.set_title(" — ".join(title_parts))
+            parts.append(specimen.material)
+        self._graph.set_title(" — ".join(parts))
 
         self._current_test_type = test_type
         self._send("RUN_3PT" if test_type == "3PT" else "RUN_T")
 
     def _send_stop(self) -> None:
         self._send("STOP")
+
+    # ==================================================================
+    # Recalculate with updated specimen data
+    # ==================================================================
+
+    def _on_recalculate(self) -> None:
+        if self._test_data.is_empty():
+            QMessageBox.information(self, "No Data",
+                                    "No test data available to recalculate.")
+            return
+        is_3pt = (self._current_test_type == "3PT")
+        specimen = self._specimen.get_specimen_data()
+        disp_list = self._test_data.displacements()
+        load_list  = self._test_data.loads()
+
+        # Redraw graph with same data and fresh title
+        self._graph.clear()
+        label = "3-Point Bend" if is_3pt else "Tensile"
+        parts = [label]
+        if specimen.sample_id:
+            parts.append(specimen.sample_id)
+        if specimen.material:
+            parts.append(specimen.material)
+        self._graph.set_title(" — ".join(parts))
+        self._graph.update_data(disp_list, load_list)
+        if disp_list:
+            self._graph.mark_completion(disp_list[-1], load_list[-1])
+
+        self._run_calculations(is_3pt, specimen, disp_list, load_list)
 
     # ==================================================================
     # CSV export
@@ -347,8 +396,7 @@ class MainWindow(QMainWindow):
 
         export_dir = cfg.get("csv_export_dir")
         path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save CSV",
+            self, "Save CSV",
             os.path.join(export_dir, default_name),
             "CSV files (*.csv)",
         )
@@ -359,7 +407,6 @@ class MainWindow(QMainWindow):
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            # Header metadata
             writer.writerow(["UTM Desktop Export"])
             writer.writerow(["Date", ts])
             writer.writerow(["Material", specimen.material])
@@ -368,7 +415,6 @@ class MainWindow(QMainWindow):
             writer.writerow(["Geometry", specimen.geometry])
             writer.writerow(["Completion reason", self._test_data.completion_reason or "—"])
             writer.writerow([])
-            # Specimen dimensions
             if specimen.geometry == "rectangular":
                 writer.writerow(["Width b (mm)", specimen.width_mm])
                 writer.writerow(["Thickness d (mm)", specimen.thickness_mm])
@@ -382,7 +428,6 @@ class MainWindow(QMainWindow):
             else:
                 writer.writerow(["Gauge length L0 (mm)", specimen.gauge_length_mm])
             writer.writerow([])
-            # Raw data
             writer.writerow(["Displacement (mm)", "Load (kg)"])
             for disp, load in self._test_data.points:
                 writer.writerow([f"{disp:.4f}", f"{load:.4f}"])
@@ -390,7 +435,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Exported", f"Data saved to:\n{path}")
 
     # ==================================================================
-    # Close event — cleanly shut down serial thread
+    # Close — cleanly shut down serial thread
     # ==================================================================
 
     def closeEvent(self, event) -> None:

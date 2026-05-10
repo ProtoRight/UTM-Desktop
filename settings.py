@@ -9,6 +9,7 @@ DEFAULTS: dict = {
     "load_drop_window": 10,
     "default_jog_speed": 50.0,
     "csv_export_dir": str(Path.home() / "Documents"),
+    "load_cell_rating_kg": 500.0,
 }
 
 _path = Path(__file__).parent / "settings.json"
