@@ -1,4 +1,4 @@
-"""Main application window — wires together all panels and the serial worker."""
+"""Main application window."""
 
 from __future__ import annotations
 
@@ -17,9 +17,8 @@ import settings as cfg
 import line_parser as prs
 from data_store import TestData
 from serial_worker import SerialWorker
-from calculations import (
-    SpecimenData, calculate_bend, calculate_tensile,
-)
+from calculations import SpecimenData, calculate_bend, calculate_tensile, preprocess
+from units import LoadUnit, DispUnit, kg_to, mm_to, load_unit_label, disp_unit_label
 
 from gui.connection_bar       import ConnectionBar
 from gui.control_panel        import ControlPanel
@@ -43,12 +42,15 @@ class MainWindow(QMainWindow):
         self._test_data = TestData()
         self._machine_state = "DISCONNECTED"
         self._arduino_verified = False
-        self._current_test_type: Optional[str] = None  # "3PT" | "TENSILE"
+        self._current_test_type: Optional[str] = None
+
+        # Current display units (internal data always kg / mm)
+        self._load_unit = LoadUnit.KG
+        self._disp_unit = DispUnit.MM
 
         cfg.load()
         self._build_ui()
 
-        # Graph refresh timer — 200 ms matches Arduino sample rate
         self._graph_timer = QTimer(self)
         self._graph_timer.setInterval(200)
         self._graph_timer.timeout.connect(self._refresh_graph)
@@ -64,16 +66,15 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 4)
         root.setSpacing(6)
 
-        # Connection bar (top)
         self._conn_bar = ConnectionBar()
         self._conn_bar.connect_requested.connect(self._on_connect)
         self._conn_bar.disconnect_requested.connect(self._on_disconnect)
+        self._conn_bar.load_unit_changed.connect(self._on_load_unit_changed)
+        self._conn_bar.disp_unit_changed.connect(self._on_disp_unit_changed)
         root.addWidget(self._conn_bar)
 
-        # Main content — horizontal splitter (left panel | right content)
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._main_splitter.setChildrenCollapsible(False)
-
         self._main_splitter.addWidget(self._build_left_panel())
         self._main_splitter.addWidget(self._build_right_panel())
         self._main_splitter.setSizes([340, 960])
@@ -81,40 +82,33 @@ class MainWindow(QMainWindow):
         self._main_splitter.setStretchFactor(1, 1)
         root.addWidget(self._main_splitter, 1)
 
-        # Serial log (bottom)
         self._serial_log = SerialLog()
         self._serial_log.command_entered.connect(self._send)
         root.addWidget(self._serial_log)
 
-    # ------------------------------------------------------------------
     def _build_left_panel(self) -> QWidget:
-        """Scrollable left panel: controls → live displays → specimen → settings."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(260)    # resizable via splitter — no fixed width
+        scroll.setMinimumWidth(260)
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
 
-        # Controls
         self._ctrl = ControlPanel()
         self._ctrl.cmd_run_3pt.connect(lambda: self._send_test("3PT"))
         self._ctrl.cmd_run_t.connect(lambda: self._send_test("TENSILE"))
         self._ctrl.cmd_stop.connect(self._send_stop)
         self._ctrl.cmd_tare.connect(lambda: self._send("TARE"))
         self._ctrl.cmd_zero.connect(lambda: self._send("ZERO"))
-        self._ctrl.cmd_jog_speed.connect(
-            lambda v: self._send(f"JOGSPEED {v:.1f}")
-        )
+        self._ctrl.cmd_jog_speed.connect(lambda v: self._send(f"JOGSPEED {v:.1f}"))
         self._ctrl.cmd_idle.connect(lambda: self._send("IDLE"))
         self._ctrl.cmd_raw.connect(lambda: self._send("RAW"))
         self._ctrl.cmd_cal.connect(lambda: self._send("CAL"))
         layout.addWidget(self._ctrl)
 
-        # Live instrument displays (side-by-side to save vertical space)
         disp_row = QHBoxLayout()
         self._load_display = LoadDisplay()
         self._load_display.setMinimumHeight(220)
@@ -123,11 +117,9 @@ class MainWindow(QMainWindow):
         disp_row.addWidget(self._disp_display)
         layout.addLayout(disp_row)
 
-        # Specimen info
         self._specimen = SpecimenPanel()
         layout.addWidget(self._specimen)
 
-        # Test settings
         self._settings = SettingsPanel()
         layout.addWidget(self._settings)
 
@@ -136,27 +128,59 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _build_right_panel(self) -> QWidget:
-        """Right panel: graph area (with instrument strip) above results."""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # Graph takes the top, expanding portion
         self._graph = LiveGraph()
         layout.addWidget(self._graph, 1)
 
-        # Results panel (fixed height below graph)
         self._results = ResultsPanel()
         self._results.export_requested.connect(self._on_export_csv)
         self._results.recalculate_requested.connect(self._on_recalculate)
-        self._results.setFixedHeight(230)
+        self._results.setFixedHeight(255)
         layout.addWidget(self._results)
 
         return w
 
     # ==================================================================
-    # Serial connection management
+    # Unit management
+    # ==================================================================
+
+    def _on_load_unit_changed(self, unit: LoadUnit) -> None:
+        self._load_unit = unit
+        self._load_display.set_display_unit(unit)
+        self._graph.set_axis_labels(
+            self._disp_axis_label(), self._load_axis_label()
+        )
+
+    def _on_disp_unit_changed(self, unit: DispUnit) -> None:
+        self._disp_unit = unit
+        self._disp_display.set_display_unit(unit)
+        self._graph.set_axis_labels(
+            self._disp_axis_label(), self._load_axis_label()
+        )
+        # Refresh graph with rescaled data
+        if not self._test_data.is_empty():
+            self._refresh_graph()
+
+    def _load_axis_label(self) -> str:
+        return f"Load ({load_unit_label(self._load_unit)})"
+
+    def _disp_axis_label(self) -> str:
+        return f"Displacement ({disp_unit_label(self._disp_unit)})"
+
+    def _convert_for_graph(
+        self, disp_mm: list[float], load_kg: list[float]
+    ) -> tuple[list[float], list[float]]:
+        """Convert raw kg/mm lists to the current display units."""
+        disp = [mm_to(d, self._disp_unit) for d in disp_mm]
+        load = [kg_to(f, self._load_unit) for f in load_kg]
+        return disp, load
+
+    # ==================================================================
+    # Serial connection
     # ==================================================================
 
     def _on_connect(self, port: str) -> None:
@@ -196,33 +220,33 @@ class MainWindow(QMainWindow):
             self._worker.send(cmd)
 
     # ==================================================================
-    # Incoming data handling
+    # Incoming data
     # ==================================================================
 
     def _on_line(self, line: str) -> None:
         self._serial_log.append(line)
         parsed = prs.parse_line(line)
 
-        # First valid line confirms Arduino identity
         if not self._arduino_verified and (parsed.reading or parsed.event):
             self._arduino_verified = True
             self._conn_bar.set_arduino_verified(True)
 
         if parsed.reading:
             r = parsed.reading
-            # Update live instrument displays
+            # Instrument displays (always in raw kg/mm internally)
             self._load_display.update_load(r.load)
             self._disp_display.update_displacement(r.displacement)
-            # Update connection bar text readouts
-            self._conn_bar.update_live(r.displacement, r.load, self._machine_state)
-
-            # Update motor state indicator (only present in IDLE output)
+            # Connection bar — converted to display units
+            self._conn_bar.update_live(
+                mm_to(r.displacement, self._disp_unit),
+                kg_to(r.load, self._load_unit),
+                disp_unit_label(self._disp_unit),
+                load_unit_label(self._load_unit),
+                self._machine_state,
+            )
             if r.motor_enabled is not None:
                 self._ctrl.update_motor_state(r.motor_enabled)
-            # NOTE: jog speed from Arduino is NOT synced to the spinbox —
-            # the spinbox shows what the user wants to SEND, not the current state.
-
-            # Accumulate test data while running
+            # Accumulate raw data during test (always in kg/mm)
             if self._machine_state in ("RUNNING_3PT", "RUNNING_T"):
                 self._test_data.add_point(r.displacement, r.load)
                 self._check_completion_conditions()
@@ -234,26 +258,21 @@ class MainWindow(QMainWindow):
         if event == prs.EVT_BOOT:
             self._machine_state = "IDLE"
             self._ctrl.set_idle()
-
         elif event == prs.EVT_IDLE:
             self._machine_state = "IDLE"
             self._ctrl.set_idle()
             self._graph_timer.stop()
             self._conn_bar.set_estop(False)
-
         elif event == prs.EVT_RUN_3PT:
             self._machine_state = "RUNNING_3PT"
             self._ctrl.set_running(True)
             self._graph_timer.start()
-
         elif event == prs.EVT_RUN_T:
             self._machine_state = "RUNNING_T"
             self._ctrl.set_running(True)
             self._graph_timer.start()
-
         elif event in (prs.EVT_FINISHED, prs.EVT_ABORT_TRAVEL, prs.EVT_ABORT_LOAD):
             self._on_test_complete("arduino")
-
         elif event == prs.EVT_ESTOP:
             self._machine_state = "ESTOP"
             self._graph_timer.stop()
@@ -264,7 +283,7 @@ class MainWindow(QMainWindow):
                 self._on_test_complete("estop")
 
     # ------------------------------------------------------------------
-    # Completion detection (software-side)
+    # Completion detection
     # ------------------------------------------------------------------
 
     def _check_completion_conditions(self) -> None:
@@ -290,14 +309,18 @@ class MainWindow(QMainWindow):
         self._ctrl.set_idle()
         self._conn_bar.set_estop(False)
 
-        # Final graph refresh + completion marker
-        disp_list = self._test_data.displacements()
-        load_list  = self._test_data.loads()
-        self._graph.update_data(disp_list, load_list)
-        if disp_list:
-            self._graph.mark_completion(disp_list[-1], load_list[-1])
+        # Preprocess: trim errant start + offset to zero
+        clean_pts  = preprocess(self._test_data.points)
+        disp_list  = [p[0] for p in clean_pts]
+        load_list  = [p[1] for p in clean_pts]
 
-        # Run calculations and show results
+        # Update graph with cleaned, unit-converted data
+        disp_disp, load_disp = self._convert_for_graph(disp_list, load_list)
+        self._graph.clear()
+        self._graph.update_data(disp_disp, load_disp)
+        if disp_disp:
+            self._graph.mark_completion(disp_disp[-1], load_disp[-1])
+
         specimen = self._specimen.get_specimen_data()
         self._run_calculations(was_3pt, specimen, disp_list, load_list)
         self._results.enable_recalculate(True)
@@ -310,21 +333,24 @@ class MainWindow(QMainWindow):
         load_list: list[float],
     ) -> None:
         if is_3pt:
-            results = calculate_bend(disp_list, load_list, specimen)
-            self._results.show_bend_results(results)
+            self._results.show_bend_results(
+                calculate_bend(disp_list, load_list, specimen)
+            )
         else:
-            results = calculate_tensile(disp_list, load_list, specimen)
-            self._results.show_tensile_results(results)
+            self._results.show_tensile_results(
+                calculate_tensile(disp_list, load_list, specimen)
+            )
 
     # ------------------------------------------------------------------
-    # Graph refresh (timer-driven)
+    # Graph refresh (timer — converts to display units)
     # ------------------------------------------------------------------
 
     def _refresh_graph(self) -> None:
-        self._graph.update_data(
+        disp_disp, load_disp = self._convert_for_graph(
             self._test_data.displacements(),
             self._test_data.loads(),
         )
+        self._graph.update_data(disp_disp, load_disp)
 
     # ==================================================================
     # Test initiation
@@ -334,6 +360,7 @@ class MainWindow(QMainWindow):
         self._test_data.clear()
         self._results.clear()
         self._graph.clear()
+        self._graph.set_axis_labels(self._disp_axis_label(), self._load_axis_label())
 
         specimen = self._specimen.get_specimen_data()
         label = "3-Point Bend" if test_type == "3PT" else "Tensile"
@@ -351,7 +378,7 @@ class MainWindow(QMainWindow):
         self._send("STOP")
 
     # ==================================================================
-    # Recalculate with updated specimen data
+    # Recalculate
     # ==================================================================
 
     def _on_recalculate(self) -> None:
@@ -359,13 +386,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Data",
                                     "No test data available to recalculate.")
             return
-        is_3pt = (self._current_test_type == "3PT")
+        is_3pt   = (self._current_test_type == "3PT")
         specimen = self._specimen.get_specimen_data()
-        disp_list = self._test_data.displacements()
-        load_list  = self._test_data.loads()
+        clean_pts = preprocess(self._test_data.points)
+        disp_list = [p[0] for p in clean_pts]
+        load_list = [p[1] for p in clean_pts]
 
-        # Redraw graph with same data and fresh title
+        # Redraw graph
         self._graph.clear()
+        self._graph.set_axis_labels(self._disp_axis_label(), self._load_axis_label())
         label = "3-Point Bend" if is_3pt else "Tensile"
         parts = [label]
         if specimen.sample_id:
@@ -373,14 +402,15 @@ class MainWindow(QMainWindow):
         if specimen.material:
             parts.append(specimen.material)
         self._graph.set_title(" — ".join(parts))
-        self._graph.update_data(disp_list, load_list)
-        if disp_list:
-            self._graph.mark_completion(disp_list[-1], load_list[-1])
+        disp_disp, load_disp = self._convert_for_graph(disp_list, load_list)
+        self._graph.update_data(disp_disp, load_disp)
+        if disp_disp:
+            self._graph.mark_completion(disp_disp[-1], load_disp[-1])
 
         self._run_calculations(is_3pt, specimen, disp_list, load_list)
 
     # ==================================================================
-    # CSV export
+    # CSV export (always raw kg/mm, with unit metadata)
     # ==================================================================
 
     def _on_export_csv(self) -> None:
@@ -402,8 +432,9 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-
         cfg.set("csv_export_dir", os.path.dirname(path))
+
+        clean_pts = preprocess(self._test_data.points)
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -429,13 +460,13 @@ class MainWindow(QMainWindow):
                 writer.writerow(["Gauge length L0 (mm)", specimen.gauge_length_mm])
             writer.writerow([])
             writer.writerow(["Displacement (mm)", "Load (kg)"])
-            for disp, load in self._test_data.points:
+            for disp, load in clean_pts:
                 writer.writerow([f"{disp:.4f}", f"{load:.4f}"])
 
         QMessageBox.information(self, "Exported", f"Data saved to:\n{path}")
 
     # ==================================================================
-    # Close — cleanly shut down serial thread
+    # Close
     # ==================================================================
 
     def closeEvent(self, event) -> None:

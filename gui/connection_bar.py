@@ -1,20 +1,28 @@
-"""Top connection bar — COM port selector, connect/disconnect, live status."""
+"""Top connection bar — COM port selector, connect/disconnect, live status, unit selectors."""
 
 from __future__ import annotations
 
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QLabel, QComboBox, QPushButton,
+    QWidget, QHBoxLayout, QLabel, QComboBox, QPushButton, QFrame,
 )
 
 from serial_worker import list_ports
+from units import LoadUnit, DispUnit
+
+
+def _vsep() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.VLine)
+    f.setFrameShadow(QFrame.Shadow.Sunken)
+    return f
 
 
 class ConnectionBar(QWidget):
-    """Emits connect_requested(port) and disconnect_requested signals."""
-
     connect_requested    = pyqtSignal(str)
     disconnect_requested = pyqtSignal()
+    load_unit_changed    = pyqtSignal(object)   # LoadUnit
+    disp_unit_changed    = pyqtSignal(object)   # DispUnit
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -26,12 +34,12 @@ class ConnectionBar(QWidget):
     def _build_ui(self) -> None:
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
+        # --- Connection controls ---
         layout.addWidget(QLabel("COM port:"))
-
         self._port_combo = QComboBox()
-        self._port_combo.setMinimumWidth(120)
+        self._port_combo.setMinimumWidth(110)
         layout.addWidget(self._port_combo)
 
         self._refresh_btn = QPushButton("Refresh")
@@ -47,19 +55,36 @@ class ConnectionBar(QWidget):
         self._status_dot = QLabel("●")
         self._status_dot.setStyleSheet("color: #888; font-size: 14px;")
         layout.addWidget(self._status_dot)
-
         self._status_label = QLabel("Disconnected")
         layout.addWidget(self._status_label)
 
         layout.addStretch()
 
-        # Live readouts (always visible, populated when connected)
-        self._load_label = QLabel("Load:  —")
-        self._disp_label = QLabel("Disp:  —")
+        # --- Live readouts ---
         self._state_label = QLabel("State:  —")
+        self._disp_label  = QLabel("Disp:  —")
+        self._load_label  = QLabel("Load:  —")
         for lbl in (self._state_label, self._disp_label, self._load_label):
             lbl.setMinimumWidth(130)
             layout.addWidget(lbl)
+
+        layout.addWidget(_vsep())
+
+        # --- Display unit selectors ---
+        layout.addWidget(QLabel("Load:"))
+        self._load_unit_combo = QComboBox()
+        self._load_unit_combo.addItems([u.value for u in LoadUnit])
+        self._load_unit_combo.setFixedWidth(52)
+        layout.addWidget(self._load_unit_combo)
+
+        layout.addWidget(QLabel("Disp:"))
+        self._disp_unit_combo = QComboBox()
+        self._disp_unit_combo.addItems([u.value for u in DispUnit])
+        self._disp_unit_combo.setFixedWidth(46)
+        layout.addWidget(self._disp_unit_combo)
+
+        self._load_unit_combo.currentIndexChanged.connect(self._on_load_unit_changed)
+        self._disp_unit_combo.currentIndexChanged.connect(self._on_disp_unit_changed)
 
     # ------------------------------------------------------------------
     def refresh_ports(self) -> None:
@@ -81,9 +106,21 @@ class ConnectionBar(QWidget):
             if port and port != "(none found)":
                 self.connect_requested.emit(port)
 
+    def _on_load_unit_changed(self, idx: int) -> None:
+        self.load_unit_changed.emit(list(LoadUnit)[idx])
+
+    def _on_disp_unit_changed(self, idx: int) -> None:
+        self.disp_unit_changed.emit(list(DispUnit)[idx])
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def current_load_unit(self) -> LoadUnit:
+        return list(LoadUnit)[self._load_unit_combo.currentIndex()]
+
+    def current_disp_unit(self) -> DispUnit:
+        return list(DispUnit)[self._disp_unit_combo.currentIndex()]
 
     def set_connected(self, connected: bool) -> None:
         self._connected = connected
@@ -91,8 +128,8 @@ class ConnectionBar(QWidget):
         self._refresh_btn.setEnabled(not connected)
         if connected:
             self._connect_btn.setText("Disconnect")
-            self._status_dot.setStyleSheet("color: #27ae60; font-size: 14px;")
-            self._status_label.setText("Connected")
+            self._status_dot.setStyleSheet("color: #e67e22; font-size: 14px;")
+            self._status_label.setText("Connected — awaiting data…")
         else:
             self._connect_btn.setText("Connect")
             self._status_dot.setStyleSheet("color: #888; font-size: 14px;")
@@ -102,17 +139,14 @@ class ConnectionBar(QWidget):
             self._state_label.setText("State:  —")
 
     def set_arduino_verified(self, verified: bool) -> None:
-        """Turns dot green/orange to show whether Arduino data is being received."""
         if verified:
             self._status_dot.setStyleSheet("color: #27ae60; font-size: 14px;")
             self._status_label.setText("Connected  ✓ Arduino detected")
-        else:
-            self._status_dot.setStyleSheet("color: #e67e22; font-size: 14px;")
-            self._status_label.setText("Connected  — awaiting data…")
 
-    def update_live(self, disp: float, load: float, state: str) -> None:
-        self._disp_label.setText(f"Disp:  {disp:.3f} mm")
-        self._load_label.setText(f"Load:  {load:.3f} kg")
+    def update_live(self, disp_val: float, load_val: float,
+                    disp_unit: str, load_unit: str, state: str) -> None:
+        self._disp_label.setText(f"Disp:  {disp_val:.3f} {disp_unit}")
+        self._load_label.setText(f"Load:  {load_val:.3f} {load_unit}")
         self._state_label.setText(f"State:  {state}")
 
     def set_estop(self, active: bool) -> None:

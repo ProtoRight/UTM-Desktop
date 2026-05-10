@@ -1,4 +1,4 @@
-"""Post-test results panel — calculated mechanical properties + export/recalculate."""
+"""Post-test results panel — calculated mechanical properties with unit toggle."""
 
 from __future__ import annotations
 
@@ -6,26 +6,32 @@ from typing import Optional
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QGroupBox, QGridLayout, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout,
+    QVBoxLayout, QHBoxLayout, QComboBox,
 )
 
 from calculations import BendResults, TensileResults
+from units import (
+    ResultsUnit, RESULTS_LABELS,
+    convert_results_load, convert_results_stress,
+    convert_results_modulus, convert_results_disp,
+)
 
 
-def _val(v: Optional[float], fmt: str = ".3f", unit: str = "") -> str:
+def _fmt(v: Optional[float], fmt: str = ".3f", unit: str = "") -> str:
     if v is None:
         return "—"
     return f"{v:{fmt}}  {unit}".strip()
 
 
 class ResultsPanel(QGroupBox):
-    """Displays mechanical property results after a test completes."""
-
     export_requested      = pyqtSignal()
     recalculate_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__("Results", parent)
+        self._last_bend: Optional[BendResults]    = None
+        self._last_tensile: Optional[TensileResults] = None
+        self._results_unit = ResultsUnit.METRIC
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -33,6 +39,18 @@ class ResultsPanel(QGroupBox):
         root = QVBoxLayout(self)
         root.setSpacing(4)
 
+        # Unit toggle row
+        unit_row = QHBoxLayout()
+        unit_row.addWidget(QLabel("Results units:"))
+        self._unit_combo = QComboBox()
+        self._unit_combo.addItems([u.value for u in ResultsUnit])
+        self._unit_combo.setFixedWidth(90)
+        self._unit_combo.currentIndexChanged.connect(self._on_unit_changed)
+        unit_row.addWidget(self._unit_combo)
+        unit_row.addStretch()
+        root.addLayout(unit_row)
+
+        # Results grid
         grid = QGridLayout()
         grid.setSpacing(4)
         grid.setColumnMinimumWidth(0, 170)
@@ -62,7 +80,6 @@ class ResultsPanel(QGroupBox):
             self._rows[key] = val_w
             grid.addWidget(lbl_w, row_idx, 0)
             grid.addWidget(val_w, row_idx, 1)
-
         root.addLayout(grid)
 
         # Button row
@@ -71,11 +88,10 @@ class ResultsPanel(QGroupBox):
         self._recalc_btn.setEnabled(False)
         self._recalc_btn.setToolTip(
             "Re-run all calculations on the last test dataset using\n"
-            "the specimen dimensions and geometry currently entered."
+            "the specimen dimensions currently entered."
         )
         self._recalc_btn.clicked.connect(self.recalculate_requested)
         btn_row.addWidget(self._recalc_btn, 1)
-
         self._export_btn = QPushButton("Export CSV")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self.export_requested)
@@ -87,40 +103,91 @@ class ResultsPanel(QGroupBox):
         if key in self._rows:
             self._rows[key].setText(text)
 
+    def _on_unit_changed(self, idx: int) -> None:
+        self._results_unit = list(ResultsUnit)[idx]
+        # Re-render whichever results are cached
+        if self._last_bend is not None:
+            self._render_bend(self._last_bend)
+        elif self._last_tensile is not None:
+            self._render_tensile(self._last_tensile)
+
+    # ------------------------------------------------------------------
+    def _render_bend(self, r: BendResults) -> None:
+        u = self._results_unit
+        lbl = RESULTS_LABELS[u]
+
+        peak_load_disp = convert_results_load(r.peak_load_N, u)
+        peak_disp_disp = convert_results_disp(r.peak_displacement_mm, u)
+
+        self._set("peak_load", f"{r.peak_load_kg:.2f} kg  "
+                               f"({peak_load_disp:.2f} {lbl['load']})")
+        self._set("peak_disp", f"{peak_disp_disp:.4f} {lbl['disp']}")
+
+        stress = (convert_results_stress(r.flexural_stress_MPa, u)
+                  if r.flexural_stress_MPa is not None else None)
+        self._set("stress",  _fmt(stress,  ".2f", lbl["stress"]))
+        self._set("strain",  _fmt(r.flexural_strain_peak, ".4f"))
+
+        mod = (convert_results_modulus(r.flexural_modulus_GPa, u)
+               if r.flexural_modulus_GPa is not None else None)
+        mod_unit = "GPa" if u == ResultsUnit.METRIC else "Msi"
+        self._set("modulus", _fmt(mod, ".3f", mod_unit))
+        self._set("yield",   "—  (N/A for bend)")
+        self._set("area",    "—  (N/A for bend)")
+        self._set("notes",   "  |  ".join(r.notes) if r.notes else "—")
+
+    def _render_tensile(self, r: TensileResults) -> None:
+        u = self._results_unit
+        lbl = RESULTS_LABELS[u]
+
+        peak_load_disp = convert_results_load(r.peak_load_N, u)
+        peak_disp_disp = convert_results_disp(r.peak_displacement_mm, u)
+
+        self._set("peak_load", f"{r.peak_load_kg:.2f} kg  "
+                               f"({peak_load_disp:.2f} {lbl['load']})")
+        self._set("peak_disp", f"{peak_disp_disp:.4f} {lbl['disp']}")
+
+        stress = (convert_results_stress(r.uts_MPa, u)
+                  if r.uts_MPa is not None else None)
+        self._set("stress",  _fmt(stress, ".2f", lbl["stress"] + "  (UTS)"))
+        self._set("strain",  _fmt(r.strain_at_peak, ".4f"))
+
+        mod = (convert_results_modulus(r.youngs_modulus_GPa, u)
+               if r.youngs_modulus_GPa is not None else None)
+        mod_unit = "GPa" if u == ResultsUnit.METRIC else "Msi"
+        self._set("modulus", _fmt(mod, ".3f", mod_unit))
+
+        yld = (convert_results_stress(r.yield_strength_MPa, u)
+               if r.yield_strength_MPa is not None else None)
+        self._set("yield",   _fmt(yld, ".2f", lbl["stress"]))
+
+        area = r.cross_section_area_mm2
+        self._set("area",    _fmt(area, ".3f", "mm²") if area else "—")
+        self._set("notes",   "  |  ".join(r.notes) if r.notes else "—")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def clear(self) -> None:
+        self._last_bend    = None
+        self._last_tensile = None
         for lbl in self._rows.values():
             lbl.setText("—")
         self._export_btn.setEnabled(False)
         self._recalc_btn.setEnabled(False)
 
     def show_bend_results(self, r: BendResults) -> None:
-        self._set("peak_load",  _val(r.peak_load_kg,  ".2f", "kg")
-                                + f"  ({_val(r.peak_load_N, '.1f', 'N')})")
-        self._set("peak_disp",  _val(r.peak_displacement_mm, ".3f", "mm"))
-        self._set("stress",     _val(r.flexural_stress_MPa,  ".2f", "MPa"))
-        self._set("strain",     _val(r.flexural_strain_peak, ".4f"))
-        self._set("modulus",    _val(r.flexural_modulus_GPa, ".3f", "GPa"))
-        self._set("yield",      "—  (N/A for bend)")
-        self._set("area",       "—  (N/A for bend)")
-        self._set("notes",      "  |  ".join(r.notes) if r.notes else "—")
+        self._last_bend    = r
+        self._last_tensile = None
+        self._render_bend(r)
         self._export_btn.setEnabled(True)
         self._recalc_btn.setEnabled(True)
 
     def show_tensile_results(self, r: TensileResults) -> None:
-        self._set("peak_load",  _val(r.peak_load_kg,  ".2f", "kg")
-                                + f"  ({_val(r.peak_load_N, '.1f', 'N')})")
-        self._set("peak_disp",  _val(r.peak_displacement_mm, ".3f", "mm"))
-        self._set("stress",     _val(r.uts_MPa,            ".2f", "MPa  (UTS)"))
-        self._set("strain",     _val(r.strain_at_peak,     ".4f"))
-        self._set("modulus",    _val(r.youngs_modulus_GPa, ".3f", "GPa"))
-        self._set("yield",      _val(r.yield_strength_MPa, ".2f", "MPa"))
-        area = r.cross_section_area_mm2
-        self._set("area",       _val(area, ".3f", "mm²") if area else "—")
-        self._set("notes",      "  |  ".join(r.notes) if r.notes else "—")
+        self._last_tensile = r
+        self._last_bend    = None
+        self._render_tensile(r)
         self._export_btn.setEnabled(True)
         self._recalc_btn.setEnabled(True)
 

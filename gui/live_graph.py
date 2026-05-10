@@ -1,10 +1,13 @@
 """Embedded matplotlib canvas for live Force vs Displacement graphing.
 
+Autoscaling: grow-only during a test — the view only ever expands, never
+shrinks, so data never jumps out of frame.
+
 Zoom controls:
   - Scroll wheel: zoom in/out centred on cursor
-  - Zoom In / Zoom Out buttons: zoom from view centre
-  - Fit button: autoscale to data extents
-  - Pan: click and drag when Pan mode is active (toggle button)
+  - + / - buttons: zoom from view centre
+  - Fit: autoscale to data extents
+  - Pan toggle: click-drag to pan
 """
 
 from __future__ import annotations
@@ -19,12 +22,12 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy,
 )
 
-
-_ZOOM_FACTOR = 1.30   # per scroll tick or button click
+_ZOOM_FACTOR = 1.30
+_AXIS_MARGIN = 0.08   # fractional margin added once when data first expands the view
 
 
 class LiveGraph(QWidget):
-    """Displays a real-time Force (kg) vs Displacement (mm) plot."""
+    """Displays a real-time Force vs Displacement plot with grow-only autoscaling."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -38,12 +41,16 @@ class LiveGraph(QWidget):
         )
 
         self._pan_active = False
-        self._pan_start  = None   # (x, y) in data coords
+        self._pan_start  = None
+
+        # Grow-only limits — updated only when data exceeds them
+        self._data_xmax: float = 0.0
+        self._data_ymax: float = 0.0
+        self._data_ymin: float = 0.0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-
         layout.addWidget(self._build_toolbar())
         layout.addWidget(self._canvas, 1)
 
@@ -52,12 +59,13 @@ class LiveGraph(QWidget):
             [], [], "ro", markersize=8, label="Test end", visible=False
         )
 
+        self._x_label = "Displacement (mm)"
+        self._y_label = "Load (kg)"
         self._setup_axes()
 
-        # Matplotlib event connections
-        self._canvas.mpl_connect("scroll_event",       self._on_scroll)
-        self._canvas.mpl_connect("button_press_event", self._on_mouse_press)
-        self._canvas.mpl_connect("motion_notify_event",self._on_mouse_move)
+        self._canvas.mpl_connect("scroll_event",        self._on_scroll)
+        self._canvas.mpl_connect("button_press_event",  self._on_mouse_press)
+        self._canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
         self._canvas.mpl_connect("button_release_event",self._on_mouse_release)
 
         self._canvas.draw()
@@ -84,48 +92,85 @@ class LiveGraph(QWidget):
         row.addStretch()
 
         self._btn_fit.clicked.connect(self.fit_to_data)
-        self._btn_zoom_in.clicked.connect(lambda: self._zoom_from_centre(1.0 / _ZOOM_FACTOR))
-        self._btn_zoom_out.clicked.connect(lambda: self._zoom_from_centre(_ZOOM_FACTOR))
+        self._btn_zoom_in.clicked.connect(
+            lambda: self._zoom_from_centre(1.0 / _ZOOM_FACTOR))
+        self._btn_zoom_out.clicked.connect(
+            lambda: self._zoom_from_centre(_ZOOM_FACTOR))
         self._btn_pan.toggled.connect(self._on_pan_toggled)
-
         return bar
 
     def _setup_axes(self) -> None:
-        self._ax.set_xlabel("Displacement (mm)", fontsize=10)
-        self._ax.set_ylabel("Load (kg)", fontsize=10)
+        self._ax.set_xlabel(self._x_label, fontsize=10)
+        self._ax.set_ylabel(self._y_label, fontsize=10)
         self._ax.set_title("Force vs Displacement", fontsize=11)
         self._ax.grid(True, linestyle="--", alpha=0.4)
         self._ax.set_xlim(0, 1)
         self._ax.set_ylim(0, 1)
 
     # ------------------------------------------------------------------
+    # Grow-only autoscale
+    # ------------------------------------------------------------------
+
+    def _grow_axes(self, disp: list[float], load: list[float]) -> None:
+        """Expand the view only when data exceeds the current padded limits."""
+        if not disp:
+            return
+
+        x_max = max(disp)
+        y_max = max(load)
+        y_min = min(load)
+
+        changed = False
+
+        if x_max > self._data_xmax:
+            self._data_xmax = x_max
+            changed = True
+        if y_max > self._data_ymax:
+            self._data_ymax = y_max
+            changed = True
+        if y_min < self._data_ymin:
+            self._data_ymin = y_min
+            changed = True
+
+        if changed:
+            x_range = max(self._data_xmax, 0.001)
+            y_range = max(self._data_ymax - self._data_ymin, 0.001)
+
+            x_pad = x_range * _AXIS_MARGIN
+            y_pad = y_range * _AXIS_MARGIN
+
+            cur_xlim = self._ax.get_xlim()
+            cur_ylim = self._ax.get_ylim()
+
+            new_xmax = max(cur_xlim[1], self._data_xmax + x_pad)
+            new_ymax = max(cur_ylim[1], self._data_ymax + y_pad)
+            new_ymin = min(cur_ylim[0], self._data_ymin - y_pad, 0)
+
+            self._ax.set_xlim(0, new_xmax)
+            self._ax.set_ylim(new_ymin, new_ymax)
+
+    # ------------------------------------------------------------------
     # Zoom / pan helpers
     # ------------------------------------------------------------------
 
     def _zoom_from_centre(self, factor: float) -> None:
-        """Scale both axes by factor around their current centre point."""
         xlim = self._ax.get_xlim()
         ylim = self._ax.get_ylim()
         xc = (xlim[0] + xlim[1]) / 2
         yc = (ylim[0] + ylim[1]) / 2
-        xr = (xlim[1] - xlim[0]) / 2 * factor
-        yr = (ylim[1] - ylim[0]) / 2 * factor
-        self._ax.set_xlim(xc - xr, xc + xr)
-        self._ax.set_ylim(yc - yr, yc + yr)
+        self._ax.set_xlim(xc - (xc - xlim[0]) * factor,
+                          xc + (xlim[1] - xc) * factor)
+        self._ax.set_ylim(yc - (yc - ylim[0]) * factor,
+                          yc + (ylim[1] - yc) * factor)
         self._canvas.draw_idle()
 
-    def _zoom_around(self, xdata: float, ydata: float, factor: float) -> None:
-        """Scale axes by factor, keeping (xdata, ydata) stationary."""
+    def _zoom_around(self, xd: float, yd: float, factor: float) -> None:
         xlim = self._ax.get_xlim()
         ylim = self._ax.get_ylim()
-        self._ax.set_xlim(
-            xdata - (xdata - xlim[0]) * factor,
-            xdata + (xlim[1] - xdata) * factor,
-        )
-        self._ax.set_ylim(
-            ydata - (ydata - ylim[0]) * factor,
-            ydata + (ylim[1] - ydata) * factor,
-        )
+        self._ax.set_xlim(xd - (xd - xlim[0]) * factor,
+                          xd + (xlim[1] - xd) * factor)
+        self._ax.set_ylim(yd - (yd - ylim[0]) * factor,
+                          yd + (ylim[1] - yd) * factor)
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -140,7 +185,8 @@ class LiveGraph(QWidget):
 
     def _on_pan_toggled(self, checked: bool) -> None:
         self._pan_active = checked
-        cursor = Qt.CursorShape.OpenHandCursor if checked else Qt.CursorShape.ArrowCursor
+        cursor = (Qt.CursorShape.OpenHandCursor if checked
+                  else Qt.CursorShape.ArrowCursor)
         self._canvas.setCursor(cursor)
 
     def _on_mouse_press(self, event) -> None:
@@ -158,7 +204,7 @@ class LiveGraph(QWidget):
             self._ax.set_ylim(ylim[0] - dy, ylim[1] - dy)
             self._canvas.draw_idle()
 
-    def _on_mouse_release(self, event) -> None:
+    def _on_mouse_release(self, _event) -> None:
         self._pan_start = None
 
     # ------------------------------------------------------------------
@@ -166,25 +212,26 @@ class LiveGraph(QWidget):
     # ------------------------------------------------------------------
 
     def update_data(self, disp: list[float], load: list[float]) -> None:
+        """Update plot data and grow the view if needed. Never shrinks."""
         if not disp:
             return
         self._line.set_xdata(disp)
         self._line.set_ydata(load)
-        self._ax.relim()
-        self._ax.autoscale_view()
-        xlim = self._ax.get_xlim()
-        ylim = self._ax.get_ylim()
-        xpad = max((xlim[1] - xlim[0]) * 0.05, 0.1)
-        ypad = max((ylim[1] - ylim[0]) * 0.05, 0.5)
-        self._ax.set_xlim(max(0, xlim[0] - xpad), xlim[1] + xpad)
-        self._ax.set_ylim(max(0, ylim[0] - ypad), ylim[1] + ypad)
+        self._grow_axes(disp, load)
         self._canvas.draw_idle()
 
     def fit_to_data(self) -> None:
-        """Autoscale to the current data extents."""
-        self._ax.relim()
-        self._ax.autoscale(True)
-        self._ax.autoscale_view()
+        """Reset view to tightly fit all current data."""
+        # Reset grow trackers so _grow_axes will recompute from scratch
+        self._data_xmax = 0.0
+        self._data_ymax = 0.0
+        self._data_ymin = 0.0
+        self._ax.set_xlim(0, 1)
+        self._ax.set_ylim(0, 1)
+        xdata = self._line.get_xdata()
+        ydata = self._line.get_ydata()
+        if len(xdata):
+            self._grow_axes(list(xdata), list(ydata))
         self._canvas.draw_idle()
 
     def mark_completion(self, disp: float, load: float) -> None:
@@ -198,6 +245,9 @@ class LiveGraph(QWidget):
         self._line.set_xdata([])
         self._line.set_ydata([])
         self._completion_dot.set_visible(False)
+        self._data_xmax = 0.0
+        self._data_ymax = 0.0
+        self._data_ymin = 0.0
         try:
             self._ax.get_legend().remove()
         except Exception:
@@ -208,4 +258,11 @@ class LiveGraph(QWidget):
 
     def set_title(self, title: str) -> None:
         self._ax.set_title(title, fontsize=11)
+        self._canvas.draw_idle()
+
+    def set_axis_labels(self, x_label: str, y_label: str) -> None:
+        self._x_label = x_label
+        self._y_label = y_label
+        self._ax.set_xlabel(x_label, fontsize=10)
+        self._ax.set_ylabel(y_label, fontsize=10)
         self._canvas.draw_idle()
