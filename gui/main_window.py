@@ -44,6 +44,10 @@ class MainWindow(QMainWindow):
         self._arduino_verified = False
         self._current_test_type: Optional[str] = None
 
+        # Preprocessed data stored after test completion (always kg/mm)
+        self._clean_disp: list[float] = []
+        self._clean_load: list[float] = []
+
         # Current display units (internal data always kg / mm)
         self._load_unit = LoadUnit.KG
         self._disp_unit = DispUnit.MM
@@ -318,10 +322,12 @@ class MainWindow(QMainWindow):
         self._ctrl.set_idle()
         self._conn_bar.set_estop(False)
 
-        # Preprocess: trim errant start + offset to zero
-        clean_pts  = preprocess(self._test_data.points)
-        disp_list  = [p[0] for p in clean_pts]
-        load_list  = [p[1] for p in clean_pts]
+        # Preprocess: trim errant start + offset to zero; cache for later refreshes
+        clean_pts        = preprocess(self._test_data.points)
+        disp_list        = [p[0] for p in clean_pts]
+        load_list        = [p[1] for p in clean_pts]
+        self._clean_disp = disp_list
+        self._clean_load = load_list
 
         # Update graph with cleaned, unit-converted data
         disp_disp, load_disp = self._convert_for_graph(disp_list, load_list)
@@ -355,10 +361,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _refresh_graph(self) -> None:
-        disp_disp, load_disp = self._convert_for_graph(
-            self._test_data.displacements(),
-            self._test_data.loads(),
-        )
+        # After test completion, use the preprocessed data so trimming is
+        # preserved when the user switches display units.
+        if self._clean_disp:
+            disp_src = self._clean_disp
+            load_src = self._clean_load
+        else:
+            disp_src = self._test_data.displacements()
+            load_src = self._test_data.loads()
+        disp_disp, load_disp = self._convert_for_graph(disp_src, load_src)
         self._graph.update_data(disp_disp, load_disp)
 
     # ==================================================================
@@ -367,6 +378,8 @@ class MainWindow(QMainWindow):
 
     def _send_test(self, test_type: str) -> None:
         self._test_data.clear()
+        self._clean_disp = []
+        self._clean_load = []
         self._results.clear()
         self._graph.clear()
         self._graph.set_axis_labels(self._disp_axis_label(), self._load_axis_label())
@@ -397,9 +410,11 @@ class MainWindow(QMainWindow):
             return
         is_3pt   = (self._current_test_type == "3PT")
         specimen = self._specimen.get_specimen_data()
-        clean_pts = preprocess(self._test_data.points)
-        disp_list = [p[0] for p in clean_pts]
-        load_list = [p[1] for p in clean_pts]
+        clean_pts        = preprocess(self._test_data.points)
+        disp_list        = [p[0] for p in clean_pts]
+        load_list        = [p[1] for p in clean_pts]
+        self._clean_disp = disp_list
+        self._clean_load = load_list
 
         # Redraw graph
         self._graph.clear()

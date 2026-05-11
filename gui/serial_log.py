@@ -33,8 +33,7 @@ class SerialLog(QGroupBox):
         font = QFont("Consolas", 8)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self._text.setFont(font)
-        self._text.setFixedHeight(100)
-        root.addWidget(self._text)
+        root.addWidget(self._text, 1)
 
         # Bottom row: manual input + send + clear
         bottom_row = QHBoxLayout()
