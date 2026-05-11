@@ -59,6 +59,24 @@ class LiveGraph(QWidget):
             [], [], "ro", markersize=8, label="Test end", visible=False
         )
 
+        # Overlay artists — hidden until explicitly enabled
+        self._modulus_line, = self._ax.plot(
+            [], [], "--", color="#e74c3c", linewidth=1.4,
+            label="Modulus line", visible=False, zorder=3,
+        )
+        self._offset_line, = self._ax.plot(
+            [], [], ":", color="#f39c12", linewidth=1.4,
+            label="0.2 % offset", visible=False, zorder=3,
+        )
+        self._peak_ref_line, = self._ax.plot(
+            [-1e9, 1e9], [0, 0], "--", color="#27ae60", linewidth=1.0,
+            label="Peak load", visible=False, zorder=2,
+        )
+        self._yield_hline, = self._ax.plot(
+            [-1e9, 1e9], [0, 0], "--", color="#9b59b6", linewidth=1.0,
+            label="Yield", visible=False, zorder=2,
+        )
+
         self._x_label = "Displacement (mm)"
         self._y_label = "Load (kg)"
         self._setup_axes()
@@ -238,8 +256,7 @@ class LiveGraph(QWidget):
         self._completion_dot.set_xdata([disp])
         self._completion_dot.set_ydata([load])
         self._completion_dot.set_visible(True)
-        self._ax.legend(fontsize=8)
-        self._canvas.draw_idle()
+        self._update_legend()
 
     def clear(self) -> None:
         self._line.set_xdata([])
@@ -248,10 +265,7 @@ class LiveGraph(QWidget):
         self._data_xmax = 0.0
         self._data_ymax = 0.0
         self._data_ymin = 0.0
-        try:
-            self._ax.get_legend().remove()
-        except Exception:
-            pass
+        self.clear_overlays()
         self._ax.set_xlim(0, 1)
         self._ax.set_ylim(0, 1)
         self._canvas.draw_idle()
@@ -265,4 +279,80 @@ class LiveGraph(QWidget):
         self._y_label = y_label
         self._ax.set_xlabel(x_label, fontsize=10)
         self._ax.set_ylabel(y_label, fontsize=10)
+        self._canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # Overlay API
+    # ------------------------------------------------------------------
+
+    def set_modulus_line(self, x_end: float, slope: float, label: str) -> None:
+        """Line from origin with given slope in current display units."""
+        self._modulus_line.set_xdata([0.0, x_end])
+        self._modulus_line.set_ydata([0.0, slope * x_end])
+        self._modulus_line.set_label(label)
+        self._modulus_line.set_visible(True)
+        self._update_legend()
+
+    def hide_modulus_line(self) -> None:
+        self._modulus_line.set_visible(False)
+        self._update_legend()
+
+    def set_offset_line(
+        self, x_offset: float, x_end: float, slope: float, label: str
+    ) -> None:
+        """0.2 % offset line: y = slope*(x - x_offset), starting where y = 0."""
+        self._offset_line.set_xdata([x_offset, x_end])
+        self._offset_line.set_ydata([0.0, slope * (x_end - x_offset)])
+        self._offset_line.set_label(label)
+        self._offset_line.set_visible(True)
+        self._update_legend()
+
+    def hide_offset_line(self) -> None:
+        self._offset_line.set_visible(False)
+        self._update_legend()
+
+    def set_peak_ref_line(self, y: float, label: str) -> None:
+        """Horizontal dashed line at the peak load value."""
+        self._peak_ref_line.set_ydata([y, y])
+        self._peak_ref_line.set_label(label)
+        self._peak_ref_line.set_visible(True)
+        self._update_legend()
+
+    def hide_peak_ref_line(self) -> None:
+        self._peak_ref_line.set_visible(False)
+        self._update_legend()
+
+    def set_yield_hline(self, y: float, label: str) -> None:
+        """Horizontal dashed line at the yield load value."""
+        self._yield_hline.set_ydata([y, y])
+        self._yield_hline.set_label(label)
+        self._yield_hline.set_visible(True)
+        self._update_legend()
+
+    def hide_yield_hline(self) -> None:
+        self._yield_hline.set_visible(False)
+        self._update_legend()
+
+    def clear_overlays(self) -> None:
+        for artist in (
+            self._modulus_line, self._offset_line,
+            self._peak_ref_line, self._yield_hline,
+        ):
+            artist.set_visible(False)
+        self._update_legend()
+
+    # ------------------------------------------------------------------
+
+    def _update_legend(self) -> None:
+        labeled = [
+            self._completion_dot, self._modulus_line,
+            self._offset_line, self._peak_ref_line, self._yield_hline,
+        ]
+        if any(a.get_visible() for a in labeled):
+            self._ax.legend(fontsize=8)
+        else:
+            try:
+                self._ax.get_legend().remove()
+            except Exception:
+                pass
         self._canvas.draw_idle()

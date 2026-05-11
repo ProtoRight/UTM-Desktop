@@ -6,7 +6,7 @@ from typing import Optional
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QGroupBox, QGridLayout, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout, QComboBox,
+    QVBoxLayout, QHBoxLayout, QComboBox, QCheckBox, QFrame,
 )
 
 from calculations import BendResults, TensileResults
@@ -26,6 +26,7 @@ def _fmt(v: Optional[float], fmt: str = ".3f", unit: str = "") -> str:
 class ResultsPanel(QGroupBox):
     export_requested      = pyqtSignal()
     recalculate_requested = pyqtSignal()
+    overlays_changed      = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__("Results", parent)
@@ -81,6 +82,28 @@ class ResultsPanel(QGroupBox):
             grid.addWidget(lbl_w, row_idx, 0)
             grid.addWidget(val_w, row_idx, 1)
         root.addLayout(grid)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #444;")
+        root.addWidget(sep)
+
+        # Overlay checkboxes
+        overlay_lbl = QLabel("Graph overlays:")
+        overlay_lbl.setStyleSheet("color: #aaa; font-size: 8pt;")
+        root.addWidget(overlay_lbl)
+
+        overlay_row = QHBoxLayout()
+        overlay_row.setSpacing(12)
+        self._chk_modulus  = QCheckBox("Modulus line")
+        self._chk_peak_ref = QCheckBox("Peak load ref")
+        self._chk_yield    = QCheckBox("Yield / 0.2 % offset")
+        for chk in (self._chk_modulus, self._chk_peak_ref, self._chk_yield):
+            chk.stateChanged.connect(lambda _: self.overlays_changed.emit())
+            overlay_row.addWidget(chk)
+        overlay_row.addStretch()
+        root.addLayout(overlay_row)
 
         # Button row
         btn_row = QHBoxLayout()
@@ -168,6 +191,18 @@ class ResultsPanel(QGroupBox):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def get_overlay_flags(self) -> dict[str, bool]:
+        return {
+            "modulus":  self._chk_modulus.isChecked(),
+            "peak_ref": self._chk_peak_ref.isChecked(),
+            "yield":    self._chk_yield.isChecked(),
+        }
+
+    def set_yield_overlay_available(self, available: bool) -> None:
+        self._chk_yield.setEnabled(available)
+        if not available:
+            self._chk_yield.setChecked(False)
 
     def clear(self) -> None:
         self._last_bend    = None

@@ -107,6 +107,7 @@ class BendResults:
     flexural_strain_peak: Optional[float] = None
     flexural_modulus_GPa: Optional[float] = None
     linear_region_end_mm: Optional[float] = None
+    linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -121,6 +122,7 @@ class TensileResults:
     youngs_modulus_GPa: Optional[float] = None
     yield_strength_MPa: Optional[float] = None
     linear_region_end_mm: Optional[float] = None
+    linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -343,8 +345,9 @@ def calculate_bend(
         slope_N_per_mm  = slope_kg_per_mm * G
         # E = L³/(48·I) · (dF/dδ)   units: mm³/mm⁴ · N/mm = N/mm² = MPa
         E_MPa = (L ** 3 / (48.0 * I)) * slope_N_per_mm
-        res.flexural_modulus_GPa = E_MPa / 1000.0
-        res.linear_region_end_mm = float(disp[mask][-1])
+        res.flexural_modulus_GPa          = E_MPa / 1000.0
+        res.linear_region_end_mm          = float(disp[mask][-1])
+        res.linear_region_slope_kg_per_mm = slope_kg_per_mm
         res.notes.append(
             f"Flexural modulus from linear region "
             f"(0 – {res.linear_region_end_mm:.2f} mm, {n_lin} pts, R²≥0.995)."
@@ -399,6 +402,8 @@ def calculate_tensile(
         E_MPa = _slope_through_origin(strain[mask], stress[mask])
         res.youngs_modulus_GPa   = E_MPa / 1000.0
         res.linear_region_end_mm = float(disp[mask][-1])
+        # slope in load/displacement space: E·A/(G·L0)  →  kg/mm
+        res.linear_region_slope_kg_per_mm = E_MPa * A / (G * L0)
         res.notes.append(
             f"Young's modulus from linear region "
             f"(0 – {res.linear_region_end_mm:.2f} mm, {n_lin} pts, R²≥0.995)."

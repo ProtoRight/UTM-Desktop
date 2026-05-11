@@ -17,7 +17,10 @@ import settings as cfg
 import line_parser as prs
 from data_store import TestData
 from serial_worker import SerialWorker
-from calculations import SpecimenData, calculate_bend, calculate_tensile, preprocess
+from calculations import (
+    G, SpecimenData, BendResults, TensileResults,
+    calculate_bend, calculate_tensile, preprocess,
+)
 from units import LoadUnit, DispUnit, kg_to, mm_to, load_unit_label, disp_unit_label
 
 from gui.connection_bar       import ConnectionBar
@@ -44,11 +47,13 @@ class MainWindow(QMainWindow):
         self._arduino_verified = False
         self._current_test_type: Optional[str] = None
 
-        # Preprocessed data stored after test completion (always kg/mm)
+        # Preprocessed data and results stored after test completion (always kg/mm)
         self._clean_disp: list[float] = []
         self._clean_load: list[float] = []
         self._completion_disp_mm: Optional[float] = None
         self._completion_load_kg: Optional[float] = None
+        self._last_results: Optional[object] = None  # BendResults | TensileResults
+        self._last_specimen: Optional[SpecimenData] = None
 
         # Current display units (internal data always kg / mm)
         self._load_unit = LoadUnit.KG
@@ -152,7 +157,8 @@ class MainWindow(QMainWindow):
         self._results = ResultsPanel()
         self._results.export_requested.connect(self._on_export_csv)
         self._results.recalculate_requested.connect(self._on_recalculate)
-        self._results.setFixedHeight(255)
+        self._results.overlays_changed.connect(self._apply_overlays)
+        self._results.setFixedHeight(290)
         layout.addWidget(self._results)
 
         return w
@@ -346,6 +352,7 @@ class MainWindow(QMainWindow):
         specimen = self._specimen.get_specimen_data()
         self._run_calculations(was_3pt, specimen, disp_list, load_list)
         self._results.enable_recalculate(True)
+        self._apply_overlays()
 
     def _run_calculations(
         self,
@@ -354,14 +361,17 @@ class MainWindow(QMainWindow):
         disp_list: list[float],
         load_list: list[float],
     ) -> None:
+        self._last_specimen = specimen
         if is_3pt:
-            self._results.show_bend_results(
-                calculate_bend(disp_list, load_list, specimen)
-            )
+            r = calculate_bend(disp_list, load_list, specimen)
+            self._last_results = r
+            self._results.set_yield_overlay_available(False)
+            self._results.show_bend_results(r)
         else:
-            self._results.show_tensile_results(
-                calculate_tensile(disp_list, load_list, specimen)
-            )
+            r = calculate_tensile(disp_list, load_list, specimen)
+            self._last_results = r
+            self._results.set_yield_overlay_available(r.yield_strength_MPa is not None)
+            self._results.show_tensile_results(r)
 
     # ------------------------------------------------------------------
     # Graph refresh (timer — converts to display units)
@@ -383,6 +393,7 @@ class MainWindow(QMainWindow):
             cd = mm_to(self._completion_disp_mm, self._disp_unit)
             cl = kg_to(self._completion_load_kg, self._load_unit)
             self._graph.mark_completion(cd, cl)
+        self._apply_overlays()
 
     # ==================================================================
     # Test initiation
@@ -394,6 +405,8 @@ class MainWindow(QMainWindow):
         self._clean_load = []
         self._completion_disp_mm = None
         self._completion_load_kg = None
+        self._last_results  = None
+        self._last_specimen = None
         self._results.clear()
         self._graph.clear()
         self._graph.set_axis_labels(self._disp_axis_label(), self._load_axis_label())
@@ -449,6 +462,73 @@ class MainWindow(QMainWindow):
             self._graph.mark_completion(disp_disp[-1], load_disp[-1])
 
         self._run_calculations(is_3pt, specimen, disp_list, load_list)
+        self._apply_overlays()
+
+    # ==================================================================
+    # Overlays
+    # ==================================================================
+
+    def _apply_overlays(self) -> None:
+        """Recompute and apply all graph overlays in the current display units."""
+        r = self._last_results
+        flags = self._results.get_overlay_flags()
+
+        if r is None:
+            self._graph.clear_overlays()
+            return
+
+        lu = self._load_unit
+        du = self._disp_unit
+
+        # Convert a slope in kg/mm to the current display-unit slope
+        def _slope(s: float) -> float:
+            return s * kg_to(1.0, lu) / mm_to(1.0, du)
+
+        # --- Modulus line ---
+        if (flags["modulus"]
+                and r.linear_region_slope_kg_per_mm is not None
+                and r.linear_region_end_mm is not None):
+            x_end = mm_to(r.linear_region_end_mm * 1.5, du)
+            label = ("Flexural E line" if isinstance(r, BendResults)
+                     else "Young's E line")
+            self._graph.set_modulus_line(x_end, _slope(r.linear_region_slope_kg_per_mm), label)
+        else:
+            self._graph.hide_modulus_line()
+
+        # --- Peak load reference line ---
+        if flags["peak_ref"]:
+            y = kg_to(r.peak_load_kg, lu)
+            self._graph.set_peak_ref_line(
+                y, f"Peak: {y:.2f} {load_unit_label(lu)}"
+            )
+        else:
+            self._graph.hide_peak_ref_line()
+
+        # --- Yield & 0.2 % offset (tensile only) ---
+        if (flags["yield"]
+                and isinstance(r, TensileResults)
+                and r.yield_strength_MPa is not None
+                and r.linear_region_slope_kg_per_mm is not None
+                and self._last_specimen is not None):
+            s   = self._last_specimen
+            A   = s.cross_section_area_mm2()
+            L0  = s.gauge_length_mm
+            # Yield load in kg
+            yield_kg = r.yield_strength_MPa * A / G
+            self._graph.set_yield_hline(
+                kg_to(yield_kg, lu),
+                f"Yield: {kg_to(yield_kg, lu):.2f} {load_unit_label(lu)}",
+            )
+            # 0.2 % offset line starts at disp = 0.002 * L0, same slope
+            x_off = mm_to(0.002 * L0, du)
+            x_end = mm_to(r.peak_displacement_mm, du)
+            self._graph.set_offset_line(
+                x_off, x_end, _slope(r.linear_region_slope_kg_per_mm),
+                "0.2 % offset",
+            )
+        else:
+            self._graph.hide_yield_hline()
+            self._graph.hide_offset_line()
 
     # ==================================================================
     # CSV export (always raw kg/mm, with unit metadata)
