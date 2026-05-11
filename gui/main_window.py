@@ -80,11 +80,18 @@ class MainWindow(QMainWindow):
         self._main_splitter.setSizes([340, 960])
         self._main_splitter.setStretchFactor(0, 0)
         self._main_splitter.setStretchFactor(1, 1)
-        root.addWidget(self._main_splitter, 1)
 
         self._serial_log = SerialLog()
         self._serial_log.command_entered.connect(self._send)
-        root.addWidget(self._serial_log)
+
+        self._vert_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._vert_splitter.setChildrenCollapsible(False)
+        self._vert_splitter.addWidget(self._main_splitter)
+        self._vert_splitter.addWidget(self._serial_log)
+        self._vert_splitter.setSizes([620, 150])
+        self._vert_splitter.setStretchFactor(0, 1)
+        self._vert_splitter.setStretchFactor(1, 0)
+        root.addWidget(self._vert_splitter, 1)
 
     def _build_left_panel(self) -> QWidget:
         scroll = QScrollArea()
@@ -154,6 +161,8 @@ class MainWindow(QMainWindow):
         self._graph.set_axis_labels(
             self._disp_axis_label(), self._load_axis_label()
         )
+        if not self._test_data.is_empty():
+            self._refresh_graph()
 
     def _on_disp_unit_changed(self, unit: DispUnit) -> None:
         self._disp_unit = unit

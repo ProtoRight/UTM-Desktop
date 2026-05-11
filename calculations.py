@@ -2,8 +2,11 @@
 
 Data preprocessing
 ------------------
-trim_errant_start   — removes anomalous displacement readings at test start
-                      (DRO sends a stale value before Arduino zeros it)
+trim_errant_start   — removes stale pre-test displacement readings; the first
+                      RUNNING packet arrives before the Arduino zeroes the DRO,
+                      so displacement may be positive or negative from prior
+                      movement.  Looks for the first near-zero point in the
+                      opening window and discards everything before it.
 offset_to_zero      — subtracts the first point's displacement so x starts at 0
 
 Linear region detection
@@ -132,22 +135,40 @@ def trim_errant_start(
 ) -> list[tuple[float, float]]:
     """Remove initial displacement outliers caused by a stale DRO reading.
 
-    Examines the first `window` points.  If the first point's displacement is
-    significantly higher than the minimum displacement seen in that window, all
-    points before the minimum are dropped.
+    The Arduino zeros the DRO when a test starts, but the first RUNNING packet
+    arrives before that zero command takes effect, so it carries the pre-test
+    displacement (positive or negative).
+
+    Strategy:
+    1. If the first point is already near zero, nothing to trim.
+    2. Find the first point within the opening `window` whose displacement is
+       near zero — that is where the Arduino-zeroed data begins.  Discard
+       everything before it.
+    3. Fallback (positive stale value with no near-zero point): find the
+       minimum displacement in the window and discard points before it.
     """
     if len(points) < 3:
         return points
 
     check_n = min(window, len(points))
     early_disps = [p[0] for p in points[:check_n]]
-    min_disp = min(early_disps)
 
-    # Nothing to trim if the first point is already at/near the minimum
-    if early_disps[0] <= min_disp + tolerance_mm:
+    # Already at zero — nothing to do
+    if abs(early_disps[0]) <= tolerance_mm:
         return points
 
-    # Find first index within tolerance of the minimum
+    # Primary: find first point near zero (post-Arduino-zero reading)
+    zero_idx = next(
+        (i for i, d in enumerate(early_disps) if abs(d) <= tolerance_mm),
+        None,
+    )
+    if zero_idx is not None:
+        return points[zero_idx:]
+
+    # Fallback: positive stale value, no near-zero found — trim to minimum
+    min_disp = min(early_disps)
+    if early_disps[0] <= min_disp + tolerance_mm:
+        return points
     start_idx = next(
         (i for i, d in enumerate(early_disps) if d <= min_disp + tolerance_mm),
         0,
