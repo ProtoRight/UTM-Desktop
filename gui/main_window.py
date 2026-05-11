@@ -47,6 +47,8 @@ class MainWindow(QMainWindow):
         # Preprocessed data stored after test completion (always kg/mm)
         self._clean_disp: list[float] = []
         self._clean_load: list[float] = []
+        self._completion_disp_mm: Optional[float] = None
+        self._completion_load_kg: Optional[float] = None
 
         # Current display units (internal data always kg / mm)
         self._load_unit = LoadUnit.KG
@@ -329,6 +331,11 @@ class MainWindow(QMainWindow):
         self._clean_disp = disp_list
         self._clean_load = load_list
 
+        # Store raw completion coordinates for re-marking on unit changes
+        if disp_list:
+            self._completion_disp_mm = disp_list[-1]
+            self._completion_load_kg = load_list[-1]
+
         # Update graph with cleaned, unit-converted data
         disp_disp, load_disp = self._convert_for_graph(disp_list, load_list)
         self._graph.clear()
@@ -371,6 +378,11 @@ class MainWindow(QMainWindow):
             load_src = self._test_data.loads()
         disp_disp, load_disp = self._convert_for_graph(disp_src, load_src)
         self._graph.update_data(disp_disp, load_disp)
+        # Re-place the completion dot in the new display units
+        if self._completion_disp_mm is not None:
+            cd = mm_to(self._completion_disp_mm, self._disp_unit)
+            cl = kg_to(self._completion_load_kg, self._load_unit)
+            self._graph.mark_completion(cd, cl)
 
     # ==================================================================
     # Test initiation
@@ -380,6 +392,8 @@ class MainWindow(QMainWindow):
         self._test_data.clear()
         self._clean_disp = []
         self._clean_load = []
+        self._completion_disp_mm = None
+        self._completion_load_kg = None
         self._results.clear()
         self._graph.clear()
         self._graph.set_axis_labels(self._disp_axis_label(), self._load_axis_label())
@@ -415,6 +429,9 @@ class MainWindow(QMainWindow):
         load_list        = [p[1] for p in clean_pts]
         self._clean_disp = disp_list
         self._clean_load = load_list
+        if disp_list:
+            self._completion_disp_mm = disp_list[-1]
+            self._completion_load_kg = load_list[-1]
 
         # Redraw graph
         self._graph.clear()
