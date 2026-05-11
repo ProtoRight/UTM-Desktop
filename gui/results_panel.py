@@ -192,6 +192,10 @@ class ResultsPanel(QGroupBox):
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def results_unit(self) -> ResultsUnit:
+        return self._results_unit
+
     def get_overlay_flags(self) -> dict[str, bool]:
         return {
             "modulus":  self._chk_modulus.isChecked(),

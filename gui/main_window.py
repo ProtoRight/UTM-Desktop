@@ -21,7 +21,12 @@ from calculations import (
     G, SpecimenData, BendResults, TensileResults,
     calculate_bend, calculate_tensile, preprocess,
 )
-from units import LoadUnit, DispUnit, kg_to, mm_to, load_unit_label, disp_unit_label
+from units import (
+    LoadUnit, DispUnit, ResultsUnit,
+    MPa_TO_KSI,
+    kg_to, mm_to, load_unit_label, disp_unit_label,
+    convert_results_stress,
+)
 
 from gui.connection_bar       import ConnectionBar
 from gui.control_panel        import ControlPanel
@@ -54,6 +59,7 @@ class MainWindow(QMainWindow):
         self._completion_load_kg: Optional[float] = None
         self._last_results: Optional[object] = None  # BendResults | TensileResults
         self._last_specimen: Optional[SpecimenData] = None
+        self._graph_mode: str = "fd"   # "fd" = force/disp, "ss" = stress/strain
 
         # Current display units (internal data always kg / mm)
         self._load_unit = LoadUnit.KG
@@ -152,13 +158,13 @@ class MainWindow(QMainWindow):
         layout.setSpacing(6)
 
         self._graph = LiveGraph()
+        self._graph.mode_changed.connect(self._on_graph_mode_changed)
         layout.addWidget(self._graph, 1)
 
         self._results = ResultsPanel()
         self._results.export_requested.connect(self._on_export_csv)
         self._results.recalculate_requested.connect(self._on_recalculate)
         self._results.overlays_changed.connect(self._apply_overlays)
-        self._results.setFixedHeight(290)
         layout.addWidget(self._results)
 
         return w
@@ -336,23 +342,17 @@ class MainWindow(QMainWindow):
         load_list        = [p[1] for p in clean_pts]
         self._clean_disp = disp_list
         self._clean_load = load_list
-
-        # Store raw completion coordinates for re-marking on unit changes
         if disp_list:
             self._completion_disp_mm = disp_list[-1]
             self._completion_load_kg = load_list[-1]
 
-        # Update graph with cleaned, unit-converted data
-        disp_disp, load_disp = self._convert_for_graph(disp_list, load_list)
-        self._graph.clear()
-        self._graph.update_data(disp_disp, load_disp)
-        if disp_disp:
-            self._graph.mark_completion(disp_disp[-1], load_disp[-1])
-
+        # Calculate first so _last_results is set before _refresh_graph
         specimen = self._specimen.get_specimen_data()
         self._run_calculations(was_3pt, specimen, disp_list, load_list)
         self._results.enable_recalculate(True)
-        self._apply_overlays()
+
+        self._graph.clear()
+        self._refresh_graph()
 
     def _run_calculations(
         self,
@@ -378,22 +378,90 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _refresh_graph(self) -> None:
-        # After test completion, use the preprocessed data so trimming is
-        # preserved when the user switches display units.
-        if self._clean_disp:
-            disp_src = self._clean_disp
-            load_src = self._clean_load
+        disp_src = self._clean_disp or self._test_data.displacements()
+        load_src = self._clean_load or self._test_data.loads()
+
+        use_ss = (
+            self._graph_mode == "ss"
+            and self._last_results is not None
+            and self._last_specimen is not None
+        )
+        if use_ss:
+            x_data, y_data, x_lbl, y_lbl = self._to_stress_strain(disp_src, load_src)
         else:
-            disp_src = self._test_data.displacements()
-            load_src = self._test_data.loads()
-        disp_disp, load_disp = self._convert_for_graph(disp_src, load_src)
-        self._graph.update_data(disp_disp, load_disp)
-        # Re-place the completion dot in the new display units
+            x_data, y_data = self._convert_for_graph(disp_src, load_src)
+            x_lbl, y_lbl  = self._disp_axis_label(), self._load_axis_label()
+
+        self._graph.set_axis_labels(x_lbl, y_lbl)
+        self._graph.update_data(x_data, y_data)
+
         if self._completion_disp_mm is not None:
-            cd = mm_to(self._completion_disp_mm, self._disp_unit)
-            cl = kg_to(self._completion_load_kg, self._load_unit)
-            self._graph.mark_completion(cd, cl)
+            if use_ss:
+                cx, cy, _, _ = self._to_stress_strain(
+                    [self._completion_disp_mm], [self._completion_load_kg]
+                )
+                self._graph.mark_completion(cx[0], cy[0])
+            else:
+                self._graph.mark_completion(
+                    mm_to(self._completion_disp_mm, self._disp_unit),
+                    kg_to(self._completion_load_kg, self._load_unit),
+                )
         self._apply_overlays()
+
+    # ------------------------------------------------------------------
+
+    def _on_graph_mode_changed(self, mode: str) -> None:
+        self._graph_mode = mode
+        if self._clean_disp or not self._test_data.is_empty():
+            self._graph.clear()
+            self._refresh_graph()
+
+    def _to_stress_strain(
+        self,
+        disp_mm: list[float],
+        load_kg: list[float],
+    ) -> tuple[list[float], list[float], str, str]:
+        """Convert to stress/strain in the current results unit."""
+        r = self._last_results
+        s = self._last_specimen
+        use_metric = (self._results.results_unit == ResultsUnit.METRIC)
+
+        ok, _ = s.is_valid_for_test()
+        if not ok:
+            x, y = self._convert_for_graph(disp_mm, load_kg)
+            return x, y, self._disp_axis_label(), self._load_axis_label()
+
+        if isinstance(r, BendResults):
+            c = s.outer_fibre_distance_mm()
+            L = s.span_mm
+            I = s.second_moment_of_area_mm4()
+            if c <= 0 or L <= 0 or I <= 0:
+                x, y = self._convert_for_graph(disp_mm, load_kg)
+                return x, y, self._disp_axis_label(), self._load_axis_label()
+            strain = [12.0 * d * c / L ** 2 for d in disp_mm]
+            stress = [f * G * L * c / (4.0 * I) for f in load_kg]
+            if not use_metric:
+                stress = [v * MPa_TO_KSI for v in stress]
+            return (
+                strain, stress,
+                "Flexural Strain (ε)",
+                "Flexural Stress (MPa)" if use_metric else "Flexural Stress (ksi)",
+            )
+        else:
+            L0 = s.gauge_length_mm
+            A  = s.cross_section_area_mm2()
+            if L0 <= 0 or A <= 0:
+                x, y = self._convert_for_graph(disp_mm, load_kg)
+                return x, y, self._disp_axis_label(), self._load_axis_label()
+            strain = [d / L0 for d in disp_mm]
+            stress = [f * G / A for f in load_kg]
+            if not use_metric:
+                stress = [v * MPa_TO_KSI for v in stress]
+            return (
+                strain, stress,
+                "Strain (ε)",
+                "Stress (MPa)" if use_metric else "Stress (ksi)",
+            )
 
     # ==================================================================
     # Test initiation
@@ -446,9 +514,6 @@ class MainWindow(QMainWindow):
             self._completion_disp_mm = disp_list[-1]
             self._completion_load_kg = load_list[-1]
 
-        # Redraw graph
-        self._graph.clear()
-        self._graph.set_axis_labels(self._disp_axis_label(), self._load_axis_label())
         label = "3-Point Bend" if is_3pt else "Tensile"
         parts = [label]
         if specimen.sample_id:
@@ -456,76 +521,136 @@ class MainWindow(QMainWindow):
         if specimen.material:
             parts.append(specimen.material)
         self._graph.set_title(" — ".join(parts))
-        disp_disp, load_disp = self._convert_for_graph(disp_list, load_list)
-        self._graph.update_data(disp_disp, load_disp)
-        if disp_disp:
-            self._graph.mark_completion(disp_disp[-1], load_disp[-1])
 
         self._run_calculations(is_3pt, specimen, disp_list, load_list)
-        self._apply_overlays()
+
+        self._graph.clear()
+        self._refresh_graph()
 
     # ==================================================================
     # Overlays
     # ==================================================================
 
     def _apply_overlays(self) -> None:
-        """Recompute and apply all graph overlays in the current display units."""
-        r = self._last_results
+        """Recompute and apply all graph overlays in the current display units/mode."""
+        r     = self._last_results
         flags = self._results.get_overlay_flags()
 
         if r is None:
             self._graph.clear_overlays()
             return
 
-        lu = self._load_unit
-        du = self._disp_unit
+        lu          = self._load_unit
+        du          = self._disp_unit
+        s           = self._last_specimen
+        use_ss      = (self._graph_mode == "ss" and s is not None)
+        use_metric  = (self._results.results_unit == ResultsUnit.METRIC)
+        stress_unit = "MPa" if use_metric else "ksi"
 
-        # Convert a slope in kg/mm to the current display-unit slope
-        def _slope(s: float) -> float:
-            return s * kg_to(1.0, lu) / mm_to(1.0, du)
+        def _fd_slope(slope_kg_per_mm: float) -> float:
+            return slope_kg_per_mm * kg_to(1.0, lu) / mm_to(1.0, du)
 
-        # --- Modulus line ---
-        if (flags["modulus"]
-                and r.linear_region_slope_kg_per_mm is not None
-                and r.linear_region_end_mm is not None):
-            x_end = mm_to(r.linear_region_end_mm * 1.5, du)
-            label = ("Flexural E line" if isinstance(r, BendResults)
-                     else "Young's E line")
-            self._graph.set_modulus_line(x_end, _slope(r.linear_region_slope_kg_per_mm), label)
+        def _mpa(v: float) -> float:
+            return v if use_metric else v * MPa_TO_KSI
+
+        # ----------------------------------------------------------------
+        # Modulus line
+        # ----------------------------------------------------------------
+        can_mod = (
+            flags["modulus"]
+            and r.linear_region_slope_kg_per_mm is not None
+            and r.linear_region_onset_mm is not None
+            and r.linear_region_end_mm is not None
+        )
+        if can_mod:
+            label = "Flexural E line" if isinstance(r, BendResults) else "Young's E line"
+            if use_ss and s is not None:
+                if isinstance(r, BendResults):
+                    c = s.outer_fibre_distance_mm(); L = s.span_mm
+                    if L > 0 and c > 0:
+                        x0  = 12 * r.linear_region_onset_mm * c / L ** 2
+                        x1  = 12 * r.peak_displacement_mm   * c / L ** 2
+                        E_d = _mpa(r.flexural_modulus_GPa * 1000) if r.flexural_modulus_GPa else None
+                        if E_d:
+                            self._graph.set_modulus_line(x0, x1, E_d, label)
+                        else:
+                            self._graph.hide_modulus_line()
+                    else:
+                        self._graph.hide_modulus_line()
+                else:
+                    L0 = s.gauge_length_mm
+                    if L0 > 0:
+                        x0  = r.linear_region_onset_mm / L0
+                        x1  = r.peak_displacement_mm   / L0
+                        E_d = _mpa(r.youngs_modulus_GPa * 1000) if r.youngs_modulus_GPa else None
+                        if E_d:
+                            self._graph.set_modulus_line(x0, x1, E_d, label)
+                        else:
+                            self._graph.hide_modulus_line()
+                    else:
+                        self._graph.hide_modulus_line()
+            else:
+                x0 = mm_to(r.linear_region_onset_mm,   du)
+                x1 = mm_to(r.peak_displacement_mm,      du)
+                self._graph.set_modulus_line(
+                    x0, x1, _fd_slope(r.linear_region_slope_kg_per_mm), label
+                )
         else:
             self._graph.hide_modulus_line()
 
-        # --- Peak load reference line ---
+        # ----------------------------------------------------------------
+        # Peak load reference
+        # ----------------------------------------------------------------
         if flags["peak_ref"]:
-            y = kg_to(r.peak_load_kg, lu)
-            self._graph.set_peak_ref_line(
-                y, f"Peak: {y:.2f} {load_unit_label(lu)}"
-            )
+            if use_ss:
+                if isinstance(r, BendResults):
+                    y = _mpa(r.flexural_stress_MPa) if r.flexural_stress_MPa else None
+                else:
+                    y = _mpa(r.uts_MPa) if r.uts_MPa else None
+                if y is not None:
+                    self._graph.set_peak_ref_line(y, f"Peak: {y:.2f} {stress_unit}")
+                else:
+                    self._graph.hide_peak_ref_line()
+            else:
+                y = kg_to(r.peak_load_kg, lu)
+                self._graph.set_peak_ref_line(y, f"Peak: {y:.2f} {load_unit_label(lu)}")
         else:
             self._graph.hide_peak_ref_line()
 
-        # --- Yield & 0.2 % offset (tensile only) ---
-        if (flags["yield"]
-                and isinstance(r, TensileResults)
-                and r.yield_strength_MPa is not None
-                and r.linear_region_slope_kg_per_mm is not None
-                and self._last_specimen is not None):
-            s   = self._last_specimen
-            A   = s.cross_section_area_mm2()
-            L0  = s.gauge_length_mm
-            # Yield load in kg
-            yield_kg = r.yield_strength_MPa * A / G
-            self._graph.set_yield_hline(
-                kg_to(yield_kg, lu),
-                f"Yield: {kg_to(yield_kg, lu):.2f} {load_unit_label(lu)}",
-            )
-            # 0.2 % offset line starts at disp = 0.002 * L0, same slope
-            x_off = mm_to(0.002 * L0, du)
-            x_end = mm_to(r.peak_displacement_mm, du)
-            self._graph.set_offset_line(
-                x_off, x_end, _slope(r.linear_region_slope_kg_per_mm),
-                "0.2 % offset",
-            )
+        # ----------------------------------------------------------------
+        # Yield & 0.2 % offset  (tensile only)
+        # ----------------------------------------------------------------
+        can_yield = (
+            flags["yield"]
+            and isinstance(r, TensileResults)
+            and r.yield_strength_MPa is not None
+            and r.linear_region_slope_kg_per_mm is not None
+            and r.linear_region_onset_mm is not None
+            and s is not None
+        )
+        if can_yield:
+            L0 = s.gauge_length_mm
+            A  = s.cross_section_area_mm2()
+            if use_ss and L0 > 0:
+                y_val = _mpa(r.yield_strength_MPa)
+                self._graph.set_yield_hline(y_val, f"Yield: {y_val:.2f} {stress_unit}")
+                E_d = _mpa(r.youngs_modulus_GPa * 1000) if r.youngs_modulus_GPa else None
+                if E_d and L0 > 0:
+                    x_off = r.linear_region_onset_mm / L0 + 0.002
+                    x_end = r.peak_displacement_mm   / L0
+                    self._graph.set_offset_line(x_off, x_end, E_d, "0.2 % offset")
+                else:
+                    self._graph.hide_offset_line()
+            else:
+                yield_kg = r.yield_strength_MPa * A / G
+                y_disp   = kg_to(yield_kg, lu)
+                self._graph.set_yield_hline(y_disp, f"Yield: {y_disp:.2f} {load_unit_label(lu)}")
+                x_off = mm_to(r.linear_region_onset_mm + 0.002 * L0, du)
+                x_end = mm_to(r.peak_displacement_mm, du)
+                self._graph.set_offset_line(
+                    x_off, x_end, _fd_slope(r.linear_region_slope_kg_per_mm),
+                    "0.2 % offset",
+                )
         else:
             self._graph.hide_yield_hline()
             self._graph.hide_offset_line()

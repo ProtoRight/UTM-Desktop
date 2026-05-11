@@ -17,7 +17,7 @@ matplotlib.use("QtAgg")
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy,
 )
@@ -28,6 +28,8 @@ _AXIS_MARGIN = 0.08   # fractional margin added once when data first expands the
 
 class LiveGraph(QWidget):
     """Displays a real-time Force vs Displacement plot with grow-only autoscaling."""
+
+    mode_changed = pyqtSignal(str)   # "fd" or "ss"
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -100,9 +102,12 @@ class LiveGraph(QWidget):
         self._btn_zoom_out = QPushButton("－")
         self._btn_pan      = QPushButton("Pan")
         self._btn_pan.setCheckable(True)
+        self._btn_ss       = QPushButton("S/ε")
+        self._btn_ss.setCheckable(True)
+        self._btn_ss.setToolTip("Toggle Force/Displacement ↔ Stress/Strain")
 
         for btn in (self._btn_fit, self._btn_zoom_in,
-                    self._btn_zoom_out, self._btn_pan):
+                    self._btn_zoom_out, self._btn_pan, self._btn_ss):
             btn.setFixedHeight(24)
             btn.setFixedWidth(46)
             row.addWidget(btn)
@@ -115,6 +120,8 @@ class LiveGraph(QWidget):
         self._btn_zoom_out.clicked.connect(
             lambda: self._zoom_from_centre(_ZOOM_FACTOR))
         self._btn_pan.toggled.connect(self._on_pan_toggled)
+        self._btn_ss.toggled.connect(
+            lambda checked: self.mode_changed.emit("ss" if checked else "fd"))
         return bar
 
     def _setup_axes(self) -> None:
@@ -285,10 +292,12 @@ class LiveGraph(QWidget):
     # Overlay API
     # ------------------------------------------------------------------
 
-    def set_modulus_line(self, x_end: float, slope: float, label: str) -> None:
-        """Line from origin with given slope in current display units."""
-        self._modulus_line.set_xdata([0.0, x_end])
-        self._modulus_line.set_ydata([0.0, slope * x_end])
+    def set_modulus_line(
+        self, x_start: float, x_end: float, slope: float, label: str
+    ) -> None:
+        """Line from (x_start, 0) with given slope in current display units."""
+        self._modulus_line.set_xdata([x_start, x_end])
+        self._modulus_line.set_ydata([0.0, slope * (x_end - x_start)])
         self._modulus_line.set_label(label)
         self._modulus_line.set_visible(True)
         self._update_legend()

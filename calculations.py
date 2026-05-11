@@ -106,6 +106,7 @@ class BendResults:
     flexural_stress_MPa: Optional[float]  = None
     flexural_strain_peak: Optional[float] = None
     flexural_modulus_GPa: Optional[float] = None
+    linear_region_onset_mm: Optional[float] = None
     linear_region_end_mm: Optional[float] = None
     linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
@@ -121,6 +122,7 @@ class TensileResults:
     strain_at_peak: Optional[float]     = None
     youngs_modulus_GPa: Optional[float] = None
     yield_strength_MPa: Optional[float] = None
+    linear_region_onset_mm: Optional[float] = None
     linear_region_end_mm: Optional[float] = None
     linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
@@ -249,10 +251,13 @@ def _find_linear_region(
         cutoff = x[0] + fallback_fraction * (x[-1] - x[0])
         return x <= cutoff
 
-    # Grow linear window
+    # Grow linear window.
+    # Offset x by x[onset] so the fit is through the contact point, not the
+    # machine zero — pre-contact travel must not distort the slope.
+    x_onset = x[onset]
     best_end = onset + min_pts
     for end in range(onset + min_pts + 1, n + 1):
-        r2 = _r2_through_origin(x[onset:end], y[onset:end])
+        r2 = _r2_through_origin(x[onset:end] - x_onset, y[onset:end])
         if r2 >= r2_threshold:
             best_end = end
         else:
@@ -285,9 +290,14 @@ def _yield_02_offset(
     strain: np.ndarray,
     stress: np.ndarray,
     E_MPa: float,
+    onset_strain: float = 0.0,
 ) -> Optional[float]:
-    """0.2 % offset yield strength.  Returns None if no crossing is found."""
-    offset_stress = E_MPa * (strain - 0.002)
+    """0.2 % offset yield strength.  Returns None if no crossing is found.
+
+    The offset line is σ = E·(ε − onset_strain − 0.002), i.e. 0.2 % to the
+    right of the contact onset rather than from the machine zero.
+    """
+    offset_stress = E_MPa * (strain - onset_strain - 0.002)
     diff = stress - offset_stress
     for i in range(len(diff) - 1):
         if diff[i] * diff[i + 1] <= 0 and i > 0:
@@ -341,16 +351,22 @@ def calculate_bend(
     mask = _find_linear_region(disp, load)
     n_lin = int(mask.sum())
     if n_lin >= 5:
-        slope_kg_per_mm = _slope_through_origin(disp[mask], load[mask])
+        onset_idx = int(np.where(mask)[0][0])
+        disp_off  = float(disp[onset_idx])
+        # Slope fit with disp offset to contact onset so pre-contact travel
+        # does not flatten the apparent slope.
+        slope_kg_per_mm = _slope_through_origin(disp[mask] - disp_off, load[mask])
         slope_N_per_mm  = slope_kg_per_mm * G
-        # E = L³/(48·I) · (dF/dδ)   units: mm³/mm⁴ · N/mm = N/mm² = MPa
+        # E = L³/(48·I) · (dF/dδ)
         E_MPa = (L ** 3 / (48.0 * I)) * slope_N_per_mm
         res.flexural_modulus_GPa          = E_MPa / 1000.0
+        res.linear_region_onset_mm        = disp_off
         res.linear_region_end_mm          = float(disp[mask][-1])
         res.linear_region_slope_kg_per_mm = slope_kg_per_mm
         res.notes.append(
             f"Flexural modulus from linear region "
-            f"(0 – {res.linear_region_end_mm:.2f} mm, {n_lin} pts, R²≥0.995)."
+            f"({disp_off:.2f} – {res.linear_region_end_mm:.2f} mm, "
+            f"{n_lin} pts, R²≥0.995)."
         )
     else:
         res.notes.append("Too few points in linear region — modulus not calculated.")
@@ -399,18 +415,25 @@ def calculate_tensile(
     mask = _find_linear_region(disp, load)
     n_lin = int(mask.sum())
     if n_lin >= 5:
-        E_MPa = _slope_through_origin(strain[mask], stress[mask])
-        res.youngs_modulus_GPa   = E_MPa / 1000.0
-        res.linear_region_end_mm = float(disp[mask][-1])
-        # slope in load/displacement space: E·A/(G·L0)  →  kg/mm
+        onset_idx  = int(np.where(mask)[0][0])
+        disp_off   = float(disp[onset_idx])
+        # Offset strain to contact onset so pre-contact travel doesn't
+        # flatten the apparent modulus.
+        strain_shifted = (disp[mask] - disp_off) / L0
+        E_MPa = _slope_through_origin(strain_shifted, stress[mask])
+        res.youngs_modulus_GPa            = E_MPa / 1000.0
+        res.linear_region_onset_mm        = disp_off
+        res.linear_region_end_mm          = float(disp[mask][-1])
         res.linear_region_slope_kg_per_mm = E_MPa * A / (G * L0)
         res.notes.append(
             f"Young's modulus from linear region "
-            f"(0 – {res.linear_region_end_mm:.2f} mm, {n_lin} pts, R²≥0.995)."
+            f"({disp_off:.2f} – {res.linear_region_end_mm:.2f} mm, "
+            f"{n_lin} pts, R²≥0.995)."
         )
 
-        # 0.2 % offset yield strength
-        res.yield_strength_MPa = _yield_02_offset(strain, stress, E_MPa)
+        # 0.2 % offset yield strength (offset from contact onset, not machine zero)
+        onset_strain = disp_off / L0
+        res.yield_strength_MPa = _yield_02_offset(strain, stress, E_MPa, onset_strain)
         if res.yield_strength_MPa is not None:
             res.notes.append("Yield strength via 0.2 % offset method.")
         else:
