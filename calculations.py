@@ -107,6 +107,7 @@ class BendResults:
     flexural_strain_peak: Optional[float] = None
     flexural_modulus_GPa: Optional[float] = None
     linear_region_onset_mm: Optional[float] = None
+    linear_region_onset_load_kg: Optional[float] = None
     linear_region_end_mm: Optional[float] = None
     linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
@@ -123,6 +124,7 @@ class TensileResults:
     youngs_modulus_GPa: Optional[float] = None
     yield_strength_MPa: Optional[float] = None
     linear_region_onset_mm: Optional[float] = None
+    linear_region_onset_load_kg: Optional[float] = None
     linear_region_end_mm: Optional[float] = None
     linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
@@ -254,10 +256,19 @@ def _find_linear_region(
     # Grow linear window.
     # Offset x by x[onset] so the fit is through the contact point, not the
     # machine zero — pre-contact travel must not distort the slope.
+    # Skip the onset point itself in R²: at x_shifted=0 the load is already
+    # non-zero (contact in progress), which adds a large residual and
+    # prematurely terminates the window even when the rest of the region is
+    # perfectly linear.
     x_onset = x[onset]
     best_end = onset + min_pts
     for end in range(onset + min_pts + 1, n + 1):
-        r2 = _r2_through_origin(x[onset:end] - x_onset, y[onset:end])
+        xi = x[onset + 1:end] - x_onset   # skip onset point
+        yi = y[onset + 1:end]
+        if len(xi) < 2:
+            best_end = end
+            continue
+        r2 = _r2_through_origin(xi, yi)
         if r2 >= r2_threshold:
             best_end = end
         else:
@@ -361,6 +372,7 @@ def calculate_bend(
         E_MPa = (L ** 3 / (48.0 * I)) * slope_N_per_mm
         res.flexural_modulus_GPa          = E_MPa / 1000.0
         res.linear_region_onset_mm        = disp_off
+        res.linear_region_onset_load_kg   = float(load[onset_idx])
         res.linear_region_end_mm          = float(disp[mask][-1])
         res.linear_region_slope_kg_per_mm = slope_kg_per_mm
         res.notes.append(
@@ -423,6 +435,7 @@ def calculate_tensile(
         E_MPa = _slope_through_origin(strain_shifted, stress[mask])
         res.youngs_modulus_GPa            = E_MPa / 1000.0
         res.linear_region_onset_mm        = disp_off
+        res.linear_region_onset_load_kg   = float(load[onset_idx])
         res.linear_region_end_mm          = float(disp[mask][-1])
         res.linear_region_slope_kg_per_mm = E_MPa * A / (G * L0)
         res.notes.append(

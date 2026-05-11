@@ -560,40 +560,47 @@ class MainWindow(QMainWindow):
             flags["modulus"]
             and r.linear_region_slope_kg_per_mm is not None
             and r.linear_region_onset_mm is not None
+            and r.linear_region_onset_load_kg is not None
             and r.linear_region_end_mm is not None
         )
         if can_mod:
-            label = "Flexural E line" if isinstance(r, BendResults) else "Young's E line"
+            label    = "Flexural E line" if isinstance(r, BendResults) else "Young's E line"
+            onset_kg = r.linear_region_onset_load_kg
             if use_ss and s is not None:
                 if isinstance(r, BendResults):
                     c = s.outer_fibre_distance_mm(); L = s.span_mm
-                    if L > 0 and c > 0:
+                    I = s.second_moment_of_area_mm4()
+                    if L > 0 and c > 0 and I > 0:
                         x0  = 12 * r.linear_region_onset_mm * c / L ** 2
+                        y0  = _mpa(onset_kg * G * L * c / (4.0 * I))
                         x1  = 12 * r.peak_displacement_mm   * c / L ** 2
                         E_d = _mpa(r.flexural_modulus_GPa * 1000) if r.flexural_modulus_GPa else None
                         if E_d:
-                            self._graph.set_modulus_line(x0, x1, E_d, label)
+                            self._graph.set_modulus_line(x0, y0, x1, E_d, label)
                         else:
                             self._graph.hide_modulus_line()
                     else:
                         self._graph.hide_modulus_line()
                 else:
                     L0 = s.gauge_length_mm
-                    if L0 > 0:
+                    A  = s.cross_section_area_mm2()
+                    if L0 > 0 and A > 0:
                         x0  = r.linear_region_onset_mm / L0
+                        y0  = _mpa(onset_kg * G / A)
                         x1  = r.peak_displacement_mm   / L0
                         E_d = _mpa(r.youngs_modulus_GPa * 1000) if r.youngs_modulus_GPa else None
                         if E_d:
-                            self._graph.set_modulus_line(x0, x1, E_d, label)
+                            self._graph.set_modulus_line(x0, y0, x1, E_d, label)
                         else:
                             self._graph.hide_modulus_line()
                     else:
                         self._graph.hide_modulus_line()
             else:
-                x0 = mm_to(r.linear_region_onset_mm,   du)
-                x1 = mm_to(r.peak_displacement_mm,      du)
+                x0 = mm_to(r.linear_region_onset_mm, du)
+                y0 = kg_to(onset_kg, lu)
+                x1 = mm_to(r.peak_displacement_mm,   du)
                 self._graph.set_modulus_line(
-                    x0, x1, _fd_slope(r.linear_region_slope_kg_per_mm), label
+                    x0, y0, x1, _fd_slope(r.linear_region_slope_kg_per_mm), label
                 )
         else:
             self._graph.hide_modulus_line()

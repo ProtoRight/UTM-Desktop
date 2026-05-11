@@ -293,11 +293,11 @@ class LiveGraph(QWidget):
     # ------------------------------------------------------------------
 
     def set_modulus_line(
-        self, x_start: float, x_end: float, slope: float, label: str
+        self, x_start: float, y_start: float, x_end: float, slope: float, label: str
     ) -> None:
-        """Line from (x_start, 0) with given slope in current display units."""
+        """Line from (x_start, y_start) with given slope in current display units."""
         self._modulus_line.set_xdata([x_start, x_end])
-        self._modulus_line.set_ydata([0.0, slope * (x_end - x_start)])
+        self._modulus_line.set_ydata([y_start, y_start + slope * (x_end - x_start)])
         self._modulus_line.set_label(label)
         self._modulus_line.set_visible(True)
         self._update_legend()
