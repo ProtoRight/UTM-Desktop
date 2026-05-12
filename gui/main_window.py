@@ -688,6 +688,23 @@ class MainWindow(QMainWindow):
         cfg.set("csv_export_dir", os.path.dirname(path))
 
         clean_pts = preprocess(self._test_data.points)
+        is_3pt = (self._current_test_type == "3PT")
+
+        # Determine if computed stress/strain columns are possible
+        spec_ok, _ = specimen.is_valid_for_test()
+        ss_params: Optional[dict] = None
+        if spec_ok:
+            if is_3pt:
+                L = specimen.span_mm
+                I = specimen.second_moment_of_area_mm4()
+                c = specimen.outer_fibre_distance_mm()
+                if L > 0 and I > 0 and c > 0:
+                    ss_params = {"L": L, "I": I, "c": c}
+            else:
+                A  = specimen.cross_section_area_mm2()
+                L0 = specimen.gauge_length_mm
+                if A > 0 and L0 > 0:
+                    ss_params = {"A": A, "L0": L0}
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -712,9 +729,39 @@ class MainWindow(QMainWindow):
             else:
                 writer.writerow(["Gauge length L0 (mm)", specimen.gauge_length_mm])
             writer.writerow([])
-            writer.writerow(["Displacement (mm)", "Load (kg)"])
+
+            if ss_params:
+                if is_3pt:
+                    writer.writerow([
+                        "Displacement (mm)", "Load (kg)",
+                        "Flexural Strain (ε)", "Flexural Stress (MPa)",
+                    ])
+                else:
+                    writer.writerow([
+                        "Displacement (mm)", "Load (kg)",
+                        "Engineering Strain (ε)", "Engineering Stress (MPa)",
+                    ])
+            else:
+                writer.writerow(["Displacement (mm)", "Load (kg)"])
+
             for disp, load in clean_pts:
-                writer.writerow([f"{disp:.4f}", f"{load:.4f}"])
+                F_N = load * G
+                if ss_params and is_3pt:
+                    strain = 12.0 * disp * ss_params["c"] / ss_params["L"] ** 2
+                    stress = F_N * ss_params["L"] * ss_params["c"] / (4.0 * ss_params["I"])
+                    writer.writerow([
+                        f"{disp:.4f}", f"{load:.4f}",
+                        f"{strain:.6f}", f"{stress:.4f}",
+                    ])
+                elif ss_params:
+                    strain = disp / ss_params["L0"]
+                    stress = F_N / ss_params["A"]
+                    writer.writerow([
+                        f"{disp:.4f}", f"{load:.4f}",
+                        f"{strain:.6f}", f"{stress:.4f}",
+                    ])
+                else:
+                    writer.writerow([f"{disp:.4f}", f"{load:.4f}"])
 
         QMessageBox.information(self, "Exported", f"Data saved to:\n{path}")
 

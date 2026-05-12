@@ -254,17 +254,18 @@ def _find_linear_region(
         return x <= cutoff
 
     # Grow linear window.
-    # Offset x by x[onset] so the fit is through the contact point, not the
-    # machine zero — pre-contact travel must not distort the slope.
-    # Skip the onset point itself in R²: at x_shifted=0 the load is already
-    # non-zero (contact in progress), which adds a large residual and
-    # prematurely terminates the window even when the rest of the region is
-    # perfectly linear.
-    x_onset = x[onset]
+    # Shift both x and y to the onset point so the origin-forced fit represents
+    # Δload vs Δdisp from first contact.  Without the y-shift, a non-zero onset
+    # load (specimen already under ~1 % of peak at the threshold) causes the
+    # forced-origin R² to fail immediately, capping the window at min_pts.
+    # Skip the onset point itself in the loop: it has (Δx=0, Δy=0) by definition
+    # and contributes nothing to the fit.
+    x_onset = float(x[onset])
+    y_onset = float(y[onset])
     best_end = onset + min_pts
     for end in range(onset + min_pts + 1, n + 1):
-        xi = x[onset + 1:end] - x_onset   # skip onset point
-        yi = y[onset + 1:end]
+        xi = x[onset + 1:end] - x_onset   # Δdisp from contact onset
+        yi = y[onset + 1:end] - y_onset   # Δload from contact onset
         if len(xi) < 2:
             best_end = end
             continue
@@ -274,11 +275,13 @@ def _find_linear_region(
         else:
             break
 
-    # Sanity check: is the linear region at least 5 % of the range?
-    x_range = float(x[-1] - x[0])
-    if x_range > 0 and (float(x[best_end - 1]) - float(x[onset])) < 0.05 * x_range:
-        cutoff = x[0] + fallback_fraction * x_range
-        mask = x <= cutoff
+    # Sanity check: is the linear region at least 5 % of the *post-contact* range?
+    # Using x[-1]-x[0] (total range including run-up) would make the threshold
+    # grow with run-up length, causing spurious fallbacks on long approach strokes.
+    x_post_onset = float(x[-1] - x[onset])
+    if x_post_onset > 0 and (float(x[best_end - 1]) - x_onset) < 0.05 * x_post_onset:
+        cutoff = x_onset + fallback_fraction * x_post_onset
+        mask = (x >= x[onset]) & (x <= cutoff)
         return mask
 
     mask = np.zeros(n, dtype=bool)
@@ -364,9 +367,11 @@ def calculate_bend(
     if n_lin >= 5:
         onset_idx = int(np.where(mask)[0][0])
         disp_off  = float(disp[onset_idx])
-        # Slope fit with disp offset to contact onset so pre-contact travel
-        # does not flatten the apparent slope.
-        slope_kg_per_mm = _slope_through_origin(disp[mask] - disp_off, load[mask])
+        load_off  = float(load[onset_idx])
+        # Shift both x and y to the onset point: slope = Δload/Δdisp from contact.
+        slope_kg_per_mm = _slope_through_origin(
+            disp[mask] - disp_off, load[mask] - load_off
+        )
         slope_N_per_mm  = slope_kg_per_mm * G
         # E = L³/(48·I) · (dF/dδ)
         E_MPa = (L ** 3 / (48.0 * I)) * slope_N_per_mm
@@ -429,10 +434,12 @@ def calculate_tensile(
     if n_lin >= 5:
         onset_idx  = int(np.where(mask)[0][0])
         disp_off   = float(disp[onset_idx])
-        # Offset strain to contact onset so pre-contact travel doesn't
-        # flatten the apparent modulus.
+        stress_off = float(stress[onset_idx])
+        # Shift both Δstrain and Δstress to onset so the origin-forced fit
+        # gives the true dσ/dε from the contact point, not from machine zero.
         strain_shifted = (disp[mask] - disp_off) / L0
-        E_MPa = _slope_through_origin(strain_shifted, stress[mask])
+        stress_shifted = stress[mask] - stress_off
+        E_MPa = _slope_through_origin(strain_shifted, stress_shifted)
         res.youngs_modulus_GPa            = E_MPa / 1000.0
         res.linear_region_onset_mm        = disp_off
         res.linear_region_onset_load_kg   = float(load[onset_idx])
