@@ -9,11 +9,14 @@ trim_errant_start   — removes stale pre-test displacement readings; the first
                       opening window and discards everything before it.
 offset_to_zero      — subtracts the first point's displacement so x starts at 0
 
-Linear region detection
------------------------
-Uses a line-through-origin fit with R² threshold (default 0.995).
-Expands the linear window one point at a time from the onset of loading.
-Falls back to the first 40 % of data if the detected region is too small.
+Modulus calculation
+-------------------
+Chord modulus between two standard strain points (ISO 178 / ASTM D790).
+Default bounds: ε₁ = 0.05 %, ε₂ = 0.25 % (ISO 178).
+ASTM D790 uses 0.1 % / 0.3 % — adjust CHORD_EPS_1 / CHORD_EPS_2 if needed.
+Onset is detected as the first point where load ≥ 1 % of peak load.
+Strain is measured from onset displacement; upper bound falls back to
+maximum available strain when fracture occurs before ε₂.
 """
 
 from __future__ import annotations
@@ -202,98 +205,65 @@ def preprocess(
 
 
 # ---------------------------------------------------------------------------
-# Linear region detection (R²-based, line through origin)
+# Chord modulus (ISO 178 / ASTM D790)
 # ---------------------------------------------------------------------------
 
-def _r2_through_origin(x: np.ndarray, y: np.ndarray) -> float:
-    """R² of y = k·x (forced through origin)."""
-    denom = float(np.dot(x, x))
-    if denom < 1e-12:
-        return 0.0
-    slope = float(np.dot(x, y)) / denom
-    y_pred = slope * x
-    ss_res = float(np.sum((y - y_pred) ** 2))
-    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
-    if ss_tot < 1e-10:
-        return 1.0
-    return 1.0 - ss_res / ss_tot
+# Strain bounds measured from contact onset.
+# ISO 178 uses 0.05 % – 0.25 %; ASTM D790 uses 0.10 % – 0.30 %.
+CHORD_EPS_1: float = 0.0005   # 0.05 %
+CHORD_EPS_2: float = 0.0025   # 0.25 %
 
 
-def _find_linear_region(
-    x: np.ndarray,
-    y: np.ndarray,
-    r2_threshold: float = 0.995,
-    min_pts: int = 5,
-    fallback_fraction: float = 0.40,
-) -> np.ndarray:
-    """Return boolean mask of the initial linear region.
+def _find_onset_idx(load: np.ndarray, threshold: float = 0.01) -> int:
+    """Index of first point where load ≥ threshold × peak load."""
+    peak = float(np.max(load))
+    if peak <= 0:
+        return 0
+    thresh = peak * threshold
+    for i in range(len(load)):
+        if load[i] >= thresh:
+            return i
+    return 0
 
-    Algorithm:
-    1. Skip the initial noise toe (load < 1 % of peak) to avoid fitting noise.
-    2. Expand the window one point at a time while R² ≥ threshold.
-    3. If the detected region is < 5 % of the displacement range, fall back to
-       the first `fallback_fraction` of data.
+
+def _chord_modulus_mpa(
+    delta_strain: np.ndarray,
+    stress_mpa: np.ndarray,
+    eps1: float,
+    eps2: float,
+) -> tuple[Optional[float], float, str]:
+    """Chord modulus E = Δσ/Δε between eps1 and eps2.
+
+    Both eps1 and eps2 are strain measured from the contact onset.
+    Returns (E_MPa or None, actual_eps2_used, note).
+    Falls back to max available strain when fracture occurs before eps2.
     """
-    n = len(x)
-    if n < min_pts:
-        return np.ones(n, dtype=bool)
-
-    peak_y = float(np.max(y))
-    if peak_y <= 0:
-        return np.ones(n, dtype=bool)
-
-    # Find onset of loading (first point where load ≥ 1 % of peak)
-    onset = 0
-    for i in range(n):
-        if y[i] >= peak_y * 0.01:
-            onset = i
-            break
-
-    if n - onset < min_pts:
-        cutoff = x[0] + fallback_fraction * (x[-1] - x[0])
-        return x <= cutoff
-
-    # Grow linear window.
-    # Shift both x and y to the onset point so the origin-forced fit represents
-    # Δload vs Δdisp from first contact.  Without the y-shift, a non-zero onset
-    # load (specimen already under ~1 % of peak at the threshold) causes the
-    # forced-origin R² to fail immediately, capping the window at min_pts.
-    # Skip the onset point itself in the loop: it has (Δx=0, Δy=0) by definition
-    # and contributes nothing to the fit.
-    x_onset = float(x[onset])
-    y_onset = float(y[onset])
-    best_end = onset + min_pts
-    for end in range(onset + min_pts + 1, n + 1):
-        xi = x[onset + 1:end] - x_onset   # Δdisp from contact onset
-        yi = y[onset + 1:end] - y_onset   # Δload from contact onset
-        if len(xi) < 2:
-            best_end = end
-            continue
-        r2 = _r2_through_origin(xi, yi)
-        if r2 >= r2_threshold:
-            best_end = end
-        else:
-            break
-
-    # Sanity check: is the linear region at least 5 % of the *post-contact* range?
-    # Using x[-1]-x[0] (total range including run-up) would make the threshold
-    # grow with run-up length, causing spurious fallbacks on long approach strokes.
-    x_post_onset = float(x[-1] - x[onset])
-    if x_post_onset > 0 and (float(x[best_end - 1]) - x_onset) < 0.05 * x_post_onset:
-        cutoff = x_onset + fallback_fraction * x_post_onset
-        mask = (x >= x[onset]) & (x <= cutoff)
-        return mask
-
-    mask = np.zeros(n, dtype=bool)
-    mask[onset:best_end] = True
-    return mask
-
-
-def _slope_through_origin(x: np.ndarray, y: np.ndarray) -> float:
-    denom = float(np.dot(x, x))
-    if denom < 1e-12:
-        return 0.0
-    return float(np.dot(x, y)) / denom
+    if len(delta_strain) == 0:
+        return None, eps2, "No data — modulus not calculated."
+    max_eps = float(delta_strain[-1])
+    if max_eps < eps1:
+        return None, eps2, (
+            f"Fracture before chord lower bound ε = {eps1 * 100:.2f}% "
+            "— modulus not calculated."
+        )
+    actual_eps2 = min(eps2, max_eps)
+    sigma1 = float(np.interp(eps1,        delta_strain, stress_mpa))
+    sigma2 = float(np.interp(actual_eps2, delta_strain, stress_mpa))
+    denom  = actual_eps2 - eps1
+    if denom < 1e-10:
+        return None, actual_eps2, "Chord range too narrow — modulus not calculated."
+    E = (sigma2 - sigma1) / denom
+    if actual_eps2 < eps2 * 0.999:
+        note = (
+            f"Chord modulus ε {eps1 * 100:.2f}%→{actual_eps2 * 100:.3f}% "
+            f"(fracture before standard upper bound {eps2 * 100:.2f}%)."
+        )
+    else:
+        note = (
+            f"Chord modulus ε {eps1 * 100:.2f}%→{actual_eps2 * 100:.2f}% "
+            "(ISO 178 / ASTM D790)."
+        )
+    return E, actual_eps2, note
 
 
 # ---------------------------------------------------------------------------
@@ -361,32 +331,28 @@ def calculate_bend(
     # Flexural strain at peak: ε = 12·δ·c / L²
     res.flexural_strain_peak = 12.0 * res.peak_displacement_mm * c / (L ** 2)
 
-    # Flexural modulus from linear region
-    mask = _find_linear_region(disp, load)
-    n_lin = int(mask.sum())
-    if n_lin >= 5:
-        onset_idx = int(np.where(mask)[0][0])
-        disp_off  = float(disp[onset_idx])
-        load_off  = float(load[onset_idx])
-        # Shift both x and y to the onset point: slope = Δload/Δdisp from contact.
-        slope_kg_per_mm = _slope_through_origin(
-            disp[mask] - disp_off, load[mask] - load_off
-        )
-        slope_N_per_mm  = slope_kg_per_mm * G
-        # E = L³/(48·I) · (dF/dδ)
-        E_MPa = (L ** 3 / (48.0 * I)) * slope_N_per_mm
+    # Flexural modulus — chord method (ISO 178 / ASTM D790)
+    onset_idx  = _find_onset_idx(load)
+    onset_disp = float(disp[onset_idx])
+    onset_load = float(load[onset_idx])
+    post_disp  = disp[onset_idx:]
+    post_load  = load[onset_idx:]
+    # Flexural strain and stress from onset onwards
+    delta_strain = 12.0 * (post_disp - onset_disp) * c / L ** 2
+    flex_stress  = post_load * G * L * c / (4.0 * I)   # MPa
+
+    E_MPa, used_eps2, mod_note = _chord_modulus_mpa(
+        delta_strain, flex_stress, CHORD_EPS_1, CHORD_EPS_2
+    )
+    res.notes.append(mod_note)
+    if E_MPa is not None and E_MPa > 0:
         res.flexural_modulus_GPa          = E_MPa / 1000.0
-        res.linear_region_onset_mm        = disp_off
-        res.linear_region_onset_load_kg   = float(load[onset_idx])
-        res.linear_region_end_mm          = float(disp[mask][-1])
-        res.linear_region_slope_kg_per_mm = slope_kg_per_mm
-        res.notes.append(
-            f"Flexural modulus from linear region "
-            f"({disp_off:.2f} – {res.linear_region_end_mm:.2f} mm, "
-            f"{n_lin} pts, R²≥0.995)."
-        )
-    else:
-        res.notes.append("Too few points in linear region — modulus not calculated.")
+        res.linear_region_onset_mm        = onset_disp
+        res.linear_region_onset_load_kg   = onset_load
+        chord_end = onset_disp + used_eps2 * L ** 2 / (12.0 * c)
+        res.linear_region_end_mm          = min(chord_end, res.peak_displacement_mm)
+        # dF/dδ [kg/mm] = E_f [N/mm²] × 48I [mm⁴] / (G [N/kg] × L³ [mm³])
+        res.linear_region_slope_kg_per_mm = E_MPa * 48.0 * I / (G * L ** 3)
 
     return res
 
@@ -428,37 +394,33 @@ def calculate_tensile(
     stress = load * G / A    # MPa at each point
     strain = disp / L0       # engineering strain at each point
 
-    # Modulus from linear region
-    mask = _find_linear_region(disp, load)
-    n_lin = int(mask.sum())
-    if n_lin >= 5:
-        onset_idx  = int(np.where(mask)[0][0])
-        disp_off   = float(disp[onset_idx])
-        stress_off = float(stress[onset_idx])
-        # Shift both Δstrain and Δstress to onset so the origin-forced fit
-        # gives the true dσ/dε from the contact point, not from machine zero.
-        strain_shifted = (disp[mask] - disp_off) / L0
-        stress_shifted = stress[mask] - stress_off
-        E_MPa = _slope_through_origin(strain_shifted, stress_shifted)
-        res.youngs_modulus_GPa            = E_MPa / 1000.0
-        res.linear_region_onset_mm        = disp_off
-        res.linear_region_onset_load_kg   = float(load[onset_idx])
-        res.linear_region_end_mm          = float(disp[mask][-1])
-        res.linear_region_slope_kg_per_mm = E_MPa * A / (G * L0)
-        res.notes.append(
-            f"Young's modulus from linear region "
-            f"({disp_off:.2f} – {res.linear_region_end_mm:.2f} mm, "
-            f"{n_lin} pts, R²≥0.995)."
-        )
+    # Young's modulus — chord method (ISO 527 / ASTM E111)
+    onset_idx  = _find_onset_idx(load)
+    onset_disp = float(disp[onset_idx])
+    onset_load = float(load[onset_idx])
+    post_disp  = disp[onset_idx:]
+    post_load  = load[onset_idx:]
+    delta_strain_post = (post_disp - onset_disp) / L0
+    eng_stress_post   = post_load * G / A              # MPa
 
-        # 0.2 % offset yield strength (offset from contact onset, not machine zero)
-        onset_strain = disp_off / L0
+    E_MPa, used_eps2, mod_note = _chord_modulus_mpa(
+        delta_strain_post, eng_stress_post, CHORD_EPS_1, CHORD_EPS_2
+    )
+    res.notes.append(mod_note)
+    if E_MPa is not None and E_MPa > 0:
+        res.youngs_modulus_GPa             = E_MPa / 1000.0
+        res.linear_region_onset_mm         = onset_disp
+        res.linear_region_onset_load_kg    = onset_load
+        chord_end                          = onset_disp + used_eps2 * L0
+        res.linear_region_end_mm           = min(chord_end, res.peak_displacement_mm)
+        res.linear_region_slope_kg_per_mm  = E_MPa * A / (G * L0)
+
+        # 0.2 % offset yield strength (offset from contact onset)
+        onset_strain = onset_disp / L0
         res.yield_strength_MPa = _yield_02_offset(strain, stress, E_MPa, onset_strain)
         if res.yield_strength_MPa is not None:
             res.notes.append("Yield strength via 0.2 % offset method.")
         else:
             res.notes.append("0.2 % offset yield point not found in data.")
-    else:
-        res.notes.append("Too few points in linear region — modulus not calculated.")
 
     return res

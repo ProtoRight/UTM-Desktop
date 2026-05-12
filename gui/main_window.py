@@ -728,6 +728,35 @@ class MainWindow(QMainWindow):
                 writer.writerow(["Span L (mm)", specimen.span_mm])
             else:
                 writer.writerow(["Gauge length L0 (mm)", specimen.gauge_length_mm])
+
+            # Calculated results section
+            r = self._last_results
+            if r is not None:
+                writer.writerow([])
+                writer.writerow(["--- Calculated Results ---"])
+                writer.writerow(["Peak load (kg)",           f"{r.peak_load_kg:.4f}"])
+                writer.writerow(["Peak load (N)",            f"{r.peak_load_N:.4f}"])
+                writer.writerow(["Peak displacement (mm)",   f"{r.peak_displacement_mm:.4f}"])
+                if isinstance(r, BendResults):
+                    writer.writerow(["Flexural stress at peak (MPa)",
+                                     f"{r.flexural_stress_MPa:.4f}" if r.flexural_stress_MPa is not None else "—"])
+                    writer.writerow(["Flexural strain at peak",
+                                     f"{r.flexural_strain_peak:.6f}" if r.flexural_strain_peak is not None else "—"])
+                    writer.writerow(["Flexural modulus (GPa)",
+                                     f"{r.flexural_modulus_GPa:.4f}" if r.flexural_modulus_GPa is not None else "—"])
+                else:
+                    writer.writerow(["UTS (MPa)",
+                                     f"{r.uts_MPa:.4f}" if r.uts_MPa is not None else "—"])
+                    writer.writerow(["Engineering strain at peak",
+                                     f"{r.strain_at_peak:.6f}" if r.strain_at_peak is not None else "—"])
+                    writer.writerow(["Young's modulus (GPa)",
+                                     f"{r.youngs_modulus_GPa:.4f}" if r.youngs_modulus_GPa is not None else "—"])
+                    writer.writerow(["Yield strength 0.2% offset (MPa)",
+                                     f"{r.yield_strength_MPa:.4f}" if r.yield_strength_MPa is not None else "—"])
+                    writer.writerow(["Cross-section area (mm²)",
+                                     f"{r.cross_section_area_mm2:.4f}" if r.cross_section_area_mm2 is not None else "—"])
+                for note in r.notes:
+                    writer.writerow(["Note", note])
             writer.writerow([])
 
             if ss_params:
