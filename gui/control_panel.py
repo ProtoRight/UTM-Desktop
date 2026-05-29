@@ -5,7 +5,7 @@ from __future__ import annotations
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QDoubleSpinBox, QWidget, QFrame,
+    QLabel, QDoubleSpinBox, QWidget, QFrame, QCheckBox,
 )
 
 
@@ -28,6 +28,7 @@ class ControlPanel(QGroupBox):
     cmd_idle      = pyqtSignal()
     cmd_raw       = pyqtSignal()
     cmd_cal       = pyqtSignal()
+    abs_changed   = pyqtSignal(bool)   # emitted when absolute-value mode toggled
 
     def __init__(self, parent=None) -> None:
         super().__init__("Controls", parent)
@@ -85,6 +86,16 @@ class ControlPanel(QGroupBox):
         self._motor_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._motor_label)
 
+        # Absolute-value mode
+        self._chk_abs = QCheckBox("Use |absolute| values during test")
+        self._chk_abs.setToolTip(
+            "When checked, displacement and load are treated as absolute values\n"
+            "for graphing and calculations.  Live readouts are unaffected.\n"
+            "Both signed and absolute values are always written to the CSV."
+        )
+        root.addWidget(self._chk_abs)
+        self._chk_abs.toggled.connect(self.abs_changed)
+
         # --- Machine state buttons ---
         root.addWidget(_separator())
         state_lbl = QLabel("Machine state:")
@@ -135,6 +146,10 @@ class ControlPanel(QGroupBox):
     def set_idle(self) -> None:
         self.set_connected(True)
         self._btn_stop.setEnabled(False)
+
+    @property
+    def use_absolute(self) -> bool:
+        return self._chk_abs.isChecked()
 
     def update_motor_state(self, enabled: bool) -> None:
         if enabled:

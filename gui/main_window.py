@@ -52,14 +52,17 @@ class MainWindow(QMainWindow):
         self._arduino_verified = False
         self._current_test_type: Optional[str] = None
 
-        # Preprocessed data and results stored after test completion (always kg/mm)
+        # Preprocessed data and results stored after test completion.
+        # _clean_disp/_clean_load are always the SIGNED preprocessed values (kg/mm).
+        # _use_absolute controls whether abs() is applied for graph and calculations.
         self._clean_disp: list[float] = []
         self._clean_load: list[float] = []
-        self._completion_disp_mm: Optional[float] = None
-        self._completion_load_kg: Optional[float] = None
+        self._completion_disp_mm: Optional[float] = None   # signed
+        self._completion_load_kg: Optional[float] = None   # signed
         self._last_results: Optional[object] = None  # BendResults | TensileResults
         self._last_specimen: Optional[SpecimenData] = None
         self._graph_mode: str = "fd"   # "fd" = force/disp, "ss" = stress/strain
+        self._use_absolute: bool = False
 
         # Current display units (internal data always kg / mm)
         self._load_unit = LoadUnit.KG
@@ -131,6 +134,7 @@ class MainWindow(QMainWindow):
         self._ctrl.cmd_idle.connect(lambda: self._send("IDLE"))
         self._ctrl.cmd_raw.connect(lambda: self._send("RAW"))
         self._ctrl.cmd_cal.connect(lambda: self._send("CAL"))
+        self._ctrl.abs_changed.connect(self._on_abs_changed)
         layout.addWidget(self._ctrl)
 
         disp_row = QHBoxLayout()
@@ -197,6 +201,12 @@ class MainWindow(QMainWindow):
 
     def _disp_axis_label(self) -> str:
         return f"Displacement ({disp_unit_label(self._disp_unit)})"
+
+    def _to_working(self, values: list[float]) -> list[float]:
+        """Apply abs() to each element when absolute-value mode is active."""
+        if self._use_absolute:
+            return [abs(v) for v in values]
+        return values
 
     def _convert_for_graph(
         self, disp_mm: list[float], load_kg: list[float]
@@ -336,19 +346,25 @@ class MainWindow(QMainWindow):
         self._ctrl.set_idle()
         self._conn_bar.set_estop(False)
 
-        # Preprocess: trim errant start + offset to zero; cache for later refreshes
+        # Preprocess: trim errant start + offset to zero.
+        # _clean_disp/_clean_load always store SIGNED values; abs applied on demand.
         clean_pts        = preprocess(self._test_data.points)
         disp_list        = [p[0] for p in clean_pts]
         load_list        = [p[1] for p in clean_pts]
         self._clean_disp = disp_list
         self._clean_load = load_list
         if disp_list:
-            self._completion_disp_mm = disp_list[-1]
-            self._completion_load_kg = load_list[-1]
+            self._completion_disp_mm = disp_list[-1]   # signed
+            self._completion_load_kg = load_list[-1]   # signed
 
-        # Calculate first so _last_results is set before _refresh_graph
+        # Calculate first so _last_results is set before _refresh_graph.
+        # Pass working (possibly abs) data so modulus/stress reflect user's choice.
         specimen = self._specimen.get_specimen_data()
-        self._run_calculations(was_3pt, specimen, disp_list, load_list)
+        self._run_calculations(
+            was_3pt, specimen,
+            self._to_working(disp_list),
+            self._to_working(load_list),
+        )
         self._results.enable_recalculate(True)
 
         self._graph.clear()
@@ -378,8 +394,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _refresh_graph(self) -> None:
-        disp_src = self._clean_disp or self._test_data.displacements()
-        load_src = self._clean_load or self._test_data.loads()
+        # Apply abs if requested — live data (during test) and post-test both go
+        # through _to_working so the graph always reflects the user's choice.
+        disp_src = self._to_working(self._clean_disp or self._test_data.displacements())
+        load_src = self._to_working(self._clean_load or self._test_data.loads())
 
         use_ss = (
             self._graph_mode == "ss"
@@ -396,15 +414,16 @@ class MainWindow(QMainWindow):
         self._graph.update_data(x_data, y_data)
 
         if self._completion_disp_mm is not None:
+            # Apply abs to completion coordinates to match the graph
+            comp_d = abs(self._completion_disp_mm) if self._use_absolute else self._completion_disp_mm
+            comp_l = abs(self._completion_load_kg) if self._use_absolute else self._completion_load_kg
             if use_ss:
-                cx, cy, _, _ = self._to_stress_strain(
-                    [self._completion_disp_mm], [self._completion_load_kg]
-                )
+                cx, cy, _, _ = self._to_stress_strain([comp_d], [comp_l])
                 self._graph.mark_completion(cx[0], cy[0])
             else:
                 self._graph.mark_completion(
-                    mm_to(self._completion_disp_mm, self._disp_unit),
-                    kg_to(self._completion_load_kg, self._load_unit),
+                    mm_to(comp_d, self._disp_unit),
+                    kg_to(comp_l, self._load_unit),
                 )
         self._apply_overlays()
 
@@ -415,6 +434,21 @@ class MainWindow(QMainWindow):
         if self._clean_disp or not self._test_data.is_empty():
             self._graph.clear()
             self._refresh_graph()
+
+    def _on_abs_changed(self, checked: bool) -> None:
+        """Absolute-value mode toggled — re-run calculations and refresh graph."""
+        self._use_absolute = checked
+        if not self._clean_disp:
+            return
+        is_3pt   = (self._current_test_type == "3PT")
+        specimen = self._specimen.get_specimen_data()
+        self._run_calculations(
+            is_3pt, specimen,
+            self._to_working(self._clean_disp),
+            self._to_working(self._clean_load),
+        )
+        self._graph.clear()
+        self._refresh_graph()
 
     def _to_stress_strain(
         self,
@@ -522,7 +556,11 @@ class MainWindow(QMainWindow):
             parts.append(specimen.material)
         self._graph.set_title(" — ".join(parts))
 
-        self._run_calculations(is_3pt, specimen, disp_list, load_list)
+        self._run_calculations(
+            is_3pt, specimen,
+            self._to_working(disp_list),
+            self._to_working(load_list),
+        )
 
         self._graph.clear()
         self._refresh_graph()
@@ -690,7 +728,9 @@ class MainWindow(QMainWindow):
         clean_pts = preprocess(self._test_data.points)
         is_3pt = (self._current_test_type == "3PT")
 
-        # Determine if computed stress/strain columns are possible
+        # Determine if computed stress/strain columns are possible.
+        # Stress/strain is always computed from the abs values so the columns
+        # are positive and consistent with the calculated results section.
         spec_ok, _ = specimen.is_valid_for_test()
         ss_params: Optional[dict] = None
         if spec_ok:
@@ -759,38 +799,52 @@ class MainWindow(QMainWindow):
                     writer.writerow(["Note", note])
             writer.writerow([])
 
+            # Column headers — always include signed and absolute columns.
+            # Stress/strain are computed from absolute values to match calculations.
             if ss_params:
                 if is_3pt:
                     writer.writerow([
                         "Displacement (mm)", "Load (kg)",
+                        "|Displacement| (mm)", "|Load| (kg)",
                         "Flexural Strain (ε)", "Flexural Stress (MPa)",
                     ])
                 else:
                     writer.writerow([
                         "Displacement (mm)", "Load (kg)",
+                        "|Displacement| (mm)", "|Load| (kg)",
                         "Engineering Strain (ε)", "Engineering Stress (MPa)",
                     ])
             else:
-                writer.writerow(["Displacement (mm)", "Load (kg)"])
+                writer.writerow([
+                    "Displacement (mm)", "Load (kg)",
+                    "|Displacement| (mm)", "|Load| (kg)",
+                ])
 
             for disp, load in clean_pts:
-                F_N = load * G
+                abs_disp = abs(disp)
+                abs_load = abs(load)
+                F_N_abs  = abs_load * G
                 if ss_params and is_3pt:
-                    strain = 12.0 * disp * ss_params["c"] / ss_params["L"] ** 2
-                    stress = F_N * ss_params["L"] * ss_params["c"] / (4.0 * ss_params["I"])
+                    strain = 12.0 * abs_disp * ss_params["c"] / ss_params["L"] ** 2
+                    stress = F_N_abs * ss_params["L"] * ss_params["c"] / (4.0 * ss_params["I"])
                     writer.writerow([
                         f"{disp:.4f}", f"{load:.4f}",
+                        f"{abs_disp:.4f}", f"{abs_load:.4f}",
                         f"{strain:.6f}", f"{stress:.4f}",
                     ])
                 elif ss_params:
-                    strain = disp / ss_params["L0"]
-                    stress = F_N / ss_params["A"]
+                    strain = abs_disp / ss_params["L0"]
+                    stress = F_N_abs / ss_params["A"]
                     writer.writerow([
                         f"{disp:.4f}", f"{load:.4f}",
+                        f"{abs_disp:.4f}", f"{abs_load:.4f}",
                         f"{strain:.6f}", f"{stress:.4f}",
                     ])
                 else:
-                    writer.writerow([f"{disp:.4f}", f"{load:.4f}"])
+                    writer.writerow([
+                        f"{disp:.4f}", f"{load:.4f}",
+                        f"{abs_disp:.4f}", f"{abs_load:.4f}",
+                    ])
 
         QMessageBox.information(self, "Exported", f"Data saved to:\n{path}")
 
