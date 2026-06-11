@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
         self._ctrl.cmd_tare.connect(lambda: self._send("TARE"))
         self._ctrl.cmd_zero.connect(lambda: self._send("ZERO"))
         self._ctrl.cmd_jog_speed.connect(lambda v: self._send(f"JOGSPEED {v:.1f}"))
+        self._ctrl.cmd_test_speed.connect(lambda v: self._send(f"TESTSPEED {v:.1f}"))
         self._ctrl.cmd_idle.connect(lambda: self._send("IDLE"))
         self._ctrl.cmd_raw.connect(lambda: self._send("RAW"))
         self._ctrl.cmd_cal.connect(lambda: self._send("CAL"))

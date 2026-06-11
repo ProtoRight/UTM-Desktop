@@ -8,6 +8,8 @@ from PyQt6.QtWidgets import (
     QLabel, QDoubleSpinBox, QWidget, QFrame, QCheckBox,
 )
 
+import settings as cfg
+
 
 def _separator() -> QFrame:
     line = QFrame()
@@ -24,11 +26,12 @@ class ControlPanel(QGroupBox):
     cmd_stop      = pyqtSignal()
     cmd_tare      = pyqtSignal()
     cmd_zero      = pyqtSignal()
-    cmd_jog_speed = pyqtSignal(float)
-    cmd_idle      = pyqtSignal()
-    cmd_raw       = pyqtSignal()
-    cmd_cal       = pyqtSignal()
-    abs_changed   = pyqtSignal(bool)   # emitted when absolute-value mode toggled
+    cmd_jog_speed  = pyqtSignal(float)
+    cmd_test_speed = pyqtSignal(float)
+    cmd_idle       = pyqtSignal()
+    cmd_raw        = pyqtSignal()
+    cmd_cal        = pyqtSignal()
+    abs_changed    = pyqtSignal(bool)   # emitted when absolute-value mode toggled
 
     def __init__(self, parent=None) -> None:
         super().__init__("Controls", parent)
@@ -63,23 +66,38 @@ class ControlPanel(QGroupBox):
         util_row.addWidget(self._btn_zero)
         root.addLayout(util_row)
 
-        # --- Jog speed (label outside the spinbox) ---
+        # --- Speed controls ---
         root.addWidget(_separator())
-        jog_row = QHBoxLayout()
-        jog_row.addWidget(QLabel("Jog speed:"))
-        self._jog_spin = QDoubleSpinBox()
-        self._jog_spin.setRange(1.0, 150.0)
-        self._jog_spin.setValue(50.0)
-        self._jog_spin.setDecimals(1)
-        self._jog_spin.setSingleStep(5.0)
-        self._jog_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
-        # NOTE: no setSuffix — unit label sits outside the box
-        jog_row.addWidget(self._jog_spin, 1)
-        jog_row.addWidget(QLabel("mm/min"))
-        self._btn_set_jog = QPushButton("Set")
-        self._btn_set_jog.setFixedWidth(38)
-        jog_row.addWidget(self._btn_set_jog)
+
+        def _speed_row(label: str, default: float):
+            """Return (layout, spinbox, button) for a speed row."""
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            sb = QDoubleSpinBox()
+            sb.setRange(1.0, 150.0)
+            sb.setValue(default)
+            sb.setDecimals(1)
+            sb.setSingleStep(5.0)
+            sb.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+            row.addWidget(sb, 1)
+            row.addWidget(QLabel("mm/min"))
+            btn = QPushButton("Set")
+            btn.setFixedWidth(38)
+            row.addWidget(btn)
+            return row, sb, btn
+
+        jog_row, self._jog_spin, self._btn_set_jog = _speed_row(
+            "Jog speed:", cfg.get("default_jog_speed")
+        )
+        test_row, self._test_spin, self._btn_set_test = _speed_row(
+            "Test speed:", cfg.get("default_test_speed")
+        )
+        self._test_spin.setToolTip(
+            "Crosshead speed used during a test run.\n"
+            "Sent to the Arduino as TESTSPEED <value>."
+        )
         root.addLayout(jog_row)
+        root.addLayout(test_row)
 
         # Motor enabled indicator
         self._motor_label = QLabel("Motor: —")
@@ -119,6 +137,9 @@ class ControlPanel(QGroupBox):
         self._btn_set_jog.clicked.connect(
             lambda: self.cmd_jog_speed.emit(self._jog_spin.value())
         )
+        self._btn_set_test.clicked.connect(
+            lambda: self.cmd_test_speed.emit(self._test_spin.value())
+        )
         self._btn_idle.clicked.connect(self.cmd_idle)
         self._btn_raw.clicked.connect(self.cmd_raw)
         self._btn_cal.clicked.connect(self.cmd_cal)
@@ -129,7 +150,8 @@ class ControlPanel(QGroupBox):
 
     def set_connected(self, connected: bool) -> None:
         for btn in (self._btn_3pt, self._btn_t, self._btn_stop,
-                    self._btn_tare, self._btn_zero, self._btn_set_jog,
+                    self._btn_tare, self._btn_zero,
+                    self._btn_set_jog, self._btn_set_test,
                     self._btn_idle, self._btn_raw, self._btn_cal):
             btn.setEnabled(connected)
         if not connected:
@@ -142,6 +164,8 @@ class ControlPanel(QGroupBox):
         self._btn_stop.setEnabled(running)
         self._btn_tare.setEnabled(not running)
         self._btn_zero.setEnabled(not running)
+        # Changing test speed mid-run has no effect on the Arduino, so disable
+        self._btn_set_test.setEnabled(not running)
 
     def set_idle(self) -> None:
         self.set_connected(True)
