@@ -139,6 +139,8 @@ class SpecimenPanel(QGroupBox):
 
     def _on_test_changed(self, idx: int) -> None:
         self._test_specific_stack.setCurrentIndex(idx)
+        test_types = ["3PT", "TENSILE"]
+        self._preview.set_test_type(test_types[idx])
 
     # ------------------------------------------------------------------
     # Public API

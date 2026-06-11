@@ -63,6 +63,8 @@ class MainWindow(QMainWindow):
         self._last_specimen: Optional[SpecimenData] = None
         self._graph_mode: str = "fd"   # "fd" = force/disp, "ss" = stress/strain
         self._use_absolute: bool = False
+        self._excluded_indices: set[int] = set()
+        self._data_editor = None   # DataEditorDialog, created on first use
 
         # Current display units (internal data always kg / mm)
         self._load_unit = LoadUnit.KG
@@ -114,16 +116,14 @@ class MainWindow(QMainWindow):
         root.addWidget(self._vert_splitter, 1)
 
     def _build_left_panel(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(260)
+        # Outer container: ControlPanel pinned at top, scroll area below
+        container = QWidget()
+        container.setMinimumWidth(260)
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(8)
-
+        # --- Controls: always visible, never scrolls ---
         self._ctrl = ControlPanel()
         self._ctrl.cmd_run_3pt.connect(lambda: self._send_test("3PT"))
         self._ctrl.cmd_run_t.connect(lambda: self._send_test("TENSILE"))
@@ -136,7 +136,17 @@ class MainWindow(QMainWindow):
         self._ctrl.cmd_raw.connect(lambda: self._send("RAW"))
         self._ctrl.cmd_cal.connect(lambda: self._send("CAL"))
         self._ctrl.abs_changed.connect(self._on_abs_changed)
-        layout.addWidget(self._ctrl)
+        outer.addWidget(self._ctrl)
+
+        # --- Scrollable area for displays, specimen, settings ---
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
 
         disp_row = QHBoxLayout()
         self._load_display = LoadDisplay()
@@ -154,7 +164,8 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
         scroll.setWidget(inner)
-        return scroll
+        outer.addWidget(scroll, 1)
+        return container
 
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
@@ -170,6 +181,7 @@ class MainWindow(QMainWindow):
         self._results.export_requested.connect(self._on_export_csv)
         self._results.recalculate_requested.connect(self._on_recalculate)
         self._results.overlays_changed.connect(self._apply_overlays)
+        self._results.edit_data_requested.connect(self._open_data_editor)
         layout.addWidget(self._results)
 
         return w
@@ -368,6 +380,12 @@ class MainWindow(QMainWindow):
         )
         self._results.enable_recalculate(True)
 
+        # Refresh data editor if it's open
+        if self._data_editor is not None and self._data_editor.isVisible():
+            self._data_editor.load_data(
+                self._clean_disp, self._clean_load, self._excluded_indices
+            )
+
         self._graph.clear()
         self._refresh_graph()
 
@@ -394,11 +412,22 @@ class MainWindow(QMainWindow):
     # Graph refresh (timer — converts to display units)
     # ------------------------------------------------------------------
 
+    def _filtered_clean(self) -> tuple[list[float], list[float]]:
+        """Return _clean_disp/_clean_load with excluded indices removed."""
+        if not self._clean_disp:
+            return self._test_data.displacements(), self._test_data.loads()
+        if self._excluded_indices:
+            disp = [v for i, v in enumerate(self._clean_disp) if i not in self._excluded_indices]
+            load = [v for i, v in enumerate(self._clean_load) if i not in self._excluded_indices]
+            return disp, load
+        return self._clean_disp, self._clean_load
+
     def _refresh_graph(self) -> None:
         # Apply abs if requested — live data (during test) and post-test both go
         # through _to_working so the graph always reflects the user's choice.
-        disp_src = self._to_working(self._clean_disp or self._test_data.displacements())
-        load_src = self._to_working(self._clean_load or self._test_data.loads())
+        disp_base, load_base = self._filtered_clean()
+        disp_src = self._to_working(disp_base)
+        load_src = self._to_working(load_base)
 
         use_ss = (
             self._graph_mode == "ss"
@@ -435,6 +464,37 @@ class MainWindow(QMainWindow):
         if self._clean_disp or not self._test_data.is_empty():
             self._graph.clear()
             self._refresh_graph()
+
+    def _open_data_editor(self) -> None:
+        if not self._clean_disp:
+            return
+        from gui.data_editor import DataEditorDialog
+        if self._data_editor is None:
+            self._data_editor = DataEditorDialog(self)
+            self._data_editor.exclusions_changed.connect(self._on_exclusions_changed)
+        self._data_editor.load_data(
+            self._clean_disp, self._clean_load, self._excluded_indices
+        )
+        self._data_editor.show()
+        self._data_editor.raise_()
+        self._data_editor.activateWindow()
+
+    def _on_exclusions_changed(self, excluded: set) -> None:
+        self._excluded_indices = excluded
+        if not self._clean_disp:
+            return
+        disp_f, load_f = self._filtered_clean()
+        if not disp_f:
+            return
+        is_3pt   = (self._current_test_type == "3PT")
+        specimen = self._specimen.get_specimen_data()
+        self._run_calculations(
+            is_3pt, specimen,
+            self._to_working(disp_f),
+            self._to_working(load_f),
+        )
+        self._graph.clear()
+        self._refresh_graph()
 
     def _on_abs_changed(self, checked: bool) -> None:
         """Absolute-value mode toggled — re-run calculations and refresh graph."""
@@ -510,7 +570,10 @@ class MainWindow(QMainWindow):
         self._completion_load_kg = None
         self._last_results  = None
         self._last_specimen = None
+        self._excluded_indices = set()
         self._results.clear()
+        if self._data_editor is not None:
+            self._data_editor.hide()
         self._graph.clear()
         self._graph.set_axis_labels(self._disp_axis_label(), self._load_axis_label())
 
@@ -747,7 +810,7 @@ class MainWindow(QMainWindow):
                 if A > 0 and L0 > 0:
                     ss_params = {"A": A, "L0": L0}
 
-        with open(path, "w", newline="", encoding="utf-8") as f:
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:  # BOM so Excel detects UTF-8
             writer = csv.writer(f)
             writer.writerow(["UTM Desktop Export"])
             writer.writerow(["Date", ts])
@@ -802,26 +865,31 @@ class MainWindow(QMainWindow):
 
             # Column headers — always include signed and absolute columns.
             # Stress/strain are computed from absolute values to match calculations.
+            # "User Excluded" is always the last column regardless of ss_params
             if ss_params:
                 if is_3pt:
                     writer.writerow([
                         "Displacement (mm)", "Load (kg)",
                         "|Displacement| (mm)", "|Load| (kg)",
-                        "Flexural Strain (ε)", "Flexural Stress (MPa)",
+                        "Flexural Strain (e)", "Flexural Stress (MPa)",
+                        "User Excluded",
                     ])
                 else:
                     writer.writerow([
                         "Displacement (mm)", "Load (kg)",
                         "|Displacement| (mm)", "|Load| (kg)",
-                        "Engineering Strain (ε)", "Engineering Stress (MPa)",
+                        "Engineering Strain (e)", "Engineering Stress (MPa)",
+                        "User Excluded",
                     ])
             else:
                 writer.writerow([
                     "Displacement (mm)", "Load (kg)",
                     "|Displacement| (mm)", "|Load| (kg)",
+                    "User Excluded",
                 ])
 
-            for disp, load in clean_pts:
+            for i, (disp, load) in enumerate(clean_pts):
+                excluded_flag = "Y" if i in self._excluded_indices else ""
                 abs_disp = abs(disp)
                 abs_load = abs(load)
                 F_N_abs  = abs_load * G
@@ -832,6 +900,7 @@ class MainWindow(QMainWindow):
                         f"{disp:.4f}", f"{load:.4f}",
                         f"{abs_disp:.4f}", f"{abs_load:.4f}",
                         f"{strain:.6f}", f"{stress:.4f}",
+                        excluded_flag,
                     ])
                 elif ss_params:
                     strain = abs_disp / ss_params["L0"]
@@ -840,11 +909,13 @@ class MainWindow(QMainWindow):
                         f"{disp:.4f}", f"{load:.4f}",
                         f"{abs_disp:.4f}", f"{abs_load:.4f}",
                         f"{strain:.6f}", f"{stress:.4f}",
+                        excluded_flag,
                     ])
                 else:
                     writer.writerow([
                         f"{disp:.4f}", f"{load:.4f}",
                         f"{abs_disp:.4f}", f"{abs_load:.4f}",
+                        excluded_flag,
                     ])
 
         QMessageBox.information(self, "Exported", f"Data saved to:\n{path}")

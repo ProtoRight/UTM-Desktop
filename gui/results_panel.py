@@ -27,6 +27,7 @@ class ResultsPanel(QGroupBox):
     export_requested      = pyqtSignal()
     recalculate_requested = pyqtSignal()
     overlays_changed      = pyqtSignal()
+    edit_data_requested   = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__("Results", parent)
@@ -120,6 +121,18 @@ class ResultsPanel(QGroupBox):
         self._export_btn.clicked.connect(self.export_requested)
         btn_row.addWidget(self._export_btn)
         root.addLayout(btn_row)
+
+        # Edit data button (second row)
+        edit_row = QHBoxLayout()
+        self._edit_btn = QPushButton("✎  Edit / Exclude Data Points…")
+        self._edit_btn.setEnabled(False)
+        self._edit_btn.setToolTip(
+            "Open the data editor to manually include or exclude individual\n"
+            "data points.  Changes update the graph and results immediately."
+        )
+        self._edit_btn.clicked.connect(self.edit_data_requested)
+        edit_row.addWidget(self._edit_btn)
+        root.addLayout(edit_row)
 
     # ------------------------------------------------------------------
     def _set(self, key: str, text: str) -> None:
@@ -215,6 +228,7 @@ class ResultsPanel(QGroupBox):
             lbl.setText("—")
         self._export_btn.setEnabled(False)
         self._recalc_btn.setEnabled(False)
+        self._edit_btn.setEnabled(False)
 
     def show_bend_results(self, r: BendResults) -> None:
         self._last_bend    = r
@@ -222,6 +236,7 @@ class ResultsPanel(QGroupBox):
         self._render_bend(r)
         self._export_btn.setEnabled(True)
         self._recalc_btn.setEnabled(True)
+        self._edit_btn.setEnabled(True)
 
     def show_tensile_results(self, r: TensileResults) -> None:
         self._last_tensile = r
@@ -229,6 +244,7 @@ class ResultsPanel(QGroupBox):
         self._render_tensile(r)
         self._export_btn.setEnabled(True)
         self._recalc_btn.setEnabled(True)
+        self._edit_btn.setEnabled(True)
 
     def enable_recalculate(self, enabled: bool) -> None:
         self._recalc_btn.setEnabled(enabled)
