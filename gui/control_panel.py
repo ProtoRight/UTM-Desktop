@@ -5,7 +5,7 @@ from __future__ import annotations
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QDoubleSpinBox, QWidget, QFrame, QCheckBox,
+    QLabel, QDoubleSpinBox, QSpinBox, QWidget, QFrame, QCheckBox,
 )
 
 import settings as cfg
@@ -21,17 +21,19 @@ def _separator() -> QFrame:
 class ControlPanel(QGroupBox):
     """Emits command signals; the main window routes them to the serial worker."""
 
-    cmd_run_3pt   = pyqtSignal()
-    cmd_run_t     = pyqtSignal()
-    cmd_stop      = pyqtSignal()
-    cmd_tare      = pyqtSignal()
-    cmd_zero      = pyqtSignal()
-    cmd_jog_speed  = pyqtSignal(float)
-    cmd_test_speed = pyqtSignal(float)
-    cmd_idle       = pyqtSignal()
-    cmd_raw        = pyqtSignal()
-    cmd_cal        = pyqtSignal()
-    abs_changed    = pyqtSignal(bool)   # emitted when absolute-value mode toggled
+    cmd_run_3pt     = pyqtSignal()
+    cmd_run_t       = pyqtSignal()
+    cmd_stop        = pyqtSignal()
+    cmd_tare        = pyqtSignal()
+    cmd_zero        = pyqtSignal()
+    cmd_jog_speed   = pyqtSignal(float)
+    cmd_test_speed  = pyqtSignal(float)
+    cmd_sample_rate = pyqtSignal(int)   # ms
+    cmd_idle        = pyqtSignal()
+    cmd_raw         = pyqtSignal()
+    cmd_cal         = pyqtSignal()
+    abs_changed          = pyqtSignal(bool)
+    open_calc_requested  = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__("Controls", parent)
@@ -70,7 +72,6 @@ class ControlPanel(QGroupBox):
         root.addWidget(_separator())
 
         def _speed_row(label: str, default: float):
-            """Return (layout, spinbox, button) for a speed row."""
             row = QHBoxLayout()
             row.addWidget(QLabel(label))
             sb = QDoubleSpinBox()
@@ -98,6 +99,31 @@ class ControlPanel(QGroupBox):
         )
         root.addLayout(jog_row)
         root.addLayout(test_row)
+
+        # Sample rate row
+        sr_row = QHBoxLayout()
+        sr_row.addWidget(QLabel("Sample interval:"))
+        self._sample_spin = QSpinBox()
+        self._sample_spin.setRange(10, 2000)
+        self._sample_spin.setValue(int(cfg.get("default_sample_interval_ms")))
+        self._sample_spin.setSingleStep(10)
+        self._sample_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+        self._sample_spin.setToolTip(
+            "Minimum time (ms) between serial data packets during a test.\n"
+            "Packets are only emitted when the DRO has ticked AND this\n"
+            "interval has elapsed — so this is also a noise debounce.\n"
+            "Sent to the Arduino as SAMPLERATE <value>."
+        )
+        sr_row.addWidget(self._sample_spin, 1)
+        sr_row.addWidget(QLabel("ms"))
+        self._btn_set_sample = QPushButton("Set")
+        self._btn_set_sample.setFixedWidth(38)
+        sr_row.addWidget(self._btn_set_sample)
+        self._btn_calc = QPushButton("?")
+        self._btn_calc.setFixedWidth(26)
+        self._btn_calc.setToolTip("Open parameter calculator — get recommended\nspeed and sample interval for your specimen.")
+        sr_row.addWidget(self._btn_calc)
+        root.addLayout(sr_row)
 
         # Motor enabled indicator
         self._motor_label = QLabel("Motor: —")
@@ -140,6 +166,10 @@ class ControlPanel(QGroupBox):
         self._btn_set_test.clicked.connect(
             lambda: self.cmd_test_speed.emit(self._test_spin.value())
         )
+        self._btn_set_sample.clicked.connect(
+            lambda: self.cmd_sample_rate.emit(self._sample_spin.value())
+        )
+        self._btn_calc.clicked.connect(self.open_calc_requested)
         self._btn_idle.clicked.connect(self.cmd_idle)
         self._btn_raw.clicked.connect(self.cmd_raw)
         self._btn_cal.clicked.connect(self.cmd_cal)
@@ -151,7 +181,7 @@ class ControlPanel(QGroupBox):
     def set_connected(self, connected: bool) -> None:
         for btn in (self._btn_3pt, self._btn_t, self._btn_stop,
                     self._btn_tare, self._btn_zero,
-                    self._btn_set_jog, self._btn_set_test,
+                    self._btn_set_jog, self._btn_set_test, self._btn_set_sample,
                     self._btn_idle, self._btn_raw, self._btn_cal):
             btn.setEnabled(connected)
         if not connected:
@@ -164,8 +194,9 @@ class ControlPanel(QGroupBox):
         self._btn_stop.setEnabled(running)
         self._btn_tare.setEnabled(not running)
         self._btn_zero.setEnabled(not running)
-        # Changing test speed mid-run has no effect on the Arduino, so disable
+        # Changing speed / rate mid-run has no effect on the Arduino, so disable
         self._btn_set_test.setEnabled(not running)
+        self._btn_set_sample.setEnabled(not running)
 
     def set_idle(self) -> None:
         self.set_connected(True)

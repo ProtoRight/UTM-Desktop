@@ -6,7 +6,7 @@ A standalone Windows desktop application to control a Universal Test Machine (UT
 
 **GitHub Repo:** https://github.com/ProtoRight/UTM-Desktop  
 **Working Directory:** `D:\Documents\3D Prints\1_Universal Tester\Code\Claude_UTM Desktop`  
-**Arduino Source:** `DualMCU_UNO_V13_ISR_Stepper\DualMCU_UNO_V13_ISR_Stepper.ino`
+**Arduino Source:** `DualMCU_UNO_V13_ISR_Stepper__PCBV1\DualMCU_UNO_V13_ISR_Stepper__PCBV1.ino`
 
 ---
 
@@ -39,6 +39,7 @@ A standalone Windows desktop application to control a Universal Test Machine (UT
 | `ZERO` | Zero the DRO displacement | Any |
 | `JOGSPEED <value>` | Set jog speed mm/min (0–150) | Any |
 | `TESTSPEED <value>` | Set test crosshead speed mm/min (0–150) | Any (takes effect on next test start) |
+| `SAMPLERATE <value>` | Set minimum ms between RUNNING packets (10–2000) | Any (takes effect on next test start) |
 | `RAW` | Switch to raw ADC output mode | Any |
 | `CAL` | Enter load cell calibration mode | Any |
 | `ZERO` *(in CAL)* | Zero step of calibration | LOADCAL |

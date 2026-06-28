@@ -39,6 +39,7 @@ EVT_ABORT_TRAVEL = "ABORT_TRAVEL"
 EVT_ABORT_LOAD   = "ABORT_LOAD"
 EVT_JOGSPEED     = "INFO_JOGSPEED"
 EVT_TESTSPEED    = "INFO_TESTSPEED"
+EVT_SAMPLERATE   = "INFO_SAMPLERATE"
 
 _EVENT_MAP = {
     "BOOT OK":                                EVT_BOOT,
@@ -89,5 +90,8 @@ def parse_line(line: str) -> ParsedLine:
 
     if upper.startswith("TESTSPEED SET"):
         return ParsedLine(event=EVT_TESTSPEED, raw=line)
+
+    if upper.startswith("SAMPLERATE SET"):
+        return ParsedLine(event=EVT_SAMPLERATE, raw=line)
 
     return ParsedLine(raw=line)

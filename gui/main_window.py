@@ -132,6 +132,8 @@ class MainWindow(QMainWindow):
         self._ctrl.cmd_zero.connect(lambda: self._send("ZERO"))
         self._ctrl.cmd_jog_speed.connect(lambda v: self._send(f"JOGSPEED {v:.1f}"))
         self._ctrl.cmd_test_speed.connect(lambda v: self._send(f"TESTSPEED {v:.1f}"))
+        self._ctrl.cmd_sample_rate.connect(self._on_set_sample_rate)
+        self._ctrl.open_calc_requested.connect(self._open_param_calculator)
         self._ctrl.cmd_idle.connect(lambda: self._send("IDLE"))
         self._ctrl.cmd_raw.connect(lambda: self._send("RAW"))
         self._ctrl.cmd_cal.connect(lambda: self._send("CAL"))
@@ -919,6 +921,29 @@ class MainWindow(QMainWindow):
                     ])
 
         QMessageBox.information(self, "Exported", f"Data saved to:\n{path}")
+
+    # ==================================================================
+    # Sample rate + parameter calculator
+    # ==================================================================
+
+    def _on_set_sample_rate(self, interval_ms: int) -> None:
+        cfg.set("default_sample_interval_ms", interval_ms)
+        self._send(f"SAMPLERATE {interval_ms}")
+
+    def _open_param_calculator(self) -> None:
+        from gui.test_params_calculator import TestParamsCalculator
+        dlg = TestParamsCalculator(self._specimen.get_specimen_data(), self)
+        dlg.apply_requested.connect(self._on_calc_apply)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_calc_apply(self, speed_mmmin: float, interval_ms: int) -> None:
+        """Apply recommended parameters from the calculator."""
+        self._send(f"TESTSPEED {speed_mmmin:.1f}")
+        self._send(f"SAMPLERATE {interval_ms}")
+        cfg.set("default_test_speed", speed_mmmin)
+        cfg.set("default_sample_interval_ms", interval_ms)
 
     # ==================================================================
     # Close
