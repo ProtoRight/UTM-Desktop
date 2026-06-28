@@ -66,6 +66,7 @@ class ResultsPanel(QGroupBox):
             ("stress",     "Flexural / UTS stress:"),
             ("strain",     "Strain at peak:"),
             ("modulus",    "Modulus:"),
+            ("chord_method", "Chord method:"),
             ("yield",      "Yield strength (0.2 %):"),
             ("area",       "Cross-section area:"),
             ("sep2",       ""),
@@ -168,6 +169,10 @@ class ResultsPanel(QGroupBox):
                if r.flexural_modulus_GPa is not None else None)
         mod_unit = "GPa" if u == ResultsUnit.METRIC else "Msi"
         self._set("modulus", _fmt(mod, ".3f", mod_unit))
+        std = r.chord_standard or "Custom"
+        self._set("chord_method",
+                  f"{std}  ε {r.chord_eps1_used*100:.2f}%→{r.chord_eps2_used*100:.2f}%"
+                  if r.chord_eps1_used else "—")
         self._set("yield",   "—  (N/A for bend)")
         self._set("area",    "—  (N/A for bend)")
         self._set("notes",   "  |  ".join(r.notes) if r.notes else "—")
@@ -192,6 +197,10 @@ class ResultsPanel(QGroupBox):
                if r.youngs_modulus_GPa is not None else None)
         mod_unit = "GPa" if u == ResultsUnit.METRIC else "Msi"
         self._set("modulus", _fmt(mod, ".3f", mod_unit))
+        std = r.chord_standard or "Custom"
+        self._set("chord_method",
+                  f"{std}  ε {r.chord_eps1_used*100:.2f}%→{r.chord_eps2_used*100:.2f}%"
+                  if r.chord_eps1_used else "—")
 
         yld = (convert_results_stress(r.yield_strength_MPa, u)
                if r.yield_strength_MPa is not None else None)

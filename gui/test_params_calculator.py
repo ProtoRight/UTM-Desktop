@@ -38,12 +38,12 @@ _DRO_DEFAULT = 0.01   # mm — stated resolution of the DRO
 # Physics helpers
 # ---------------------------------------------------------------------------
 
-def _chord_window_mm(specimen: SpecimenData) -> Optional[float]:
-    """Displacement span of the ISO 178 chord window.
+def _chord_window_mm(specimen: SpecimenData, eps1: float = CHORD_EPS_1, eps2: float = CHORD_EPS_2) -> Optional[float]:
+    """Displacement span of the chord window.
 
     Depends ONLY on geometry — modulus plays no role here.
     """
-    delta_eps = CHORD_EPS_2 - CHORD_EPS_1  # 0.002 = 0.20 %
+    delta_eps = eps2 - eps1
 
     if specimen.test_type == "3PT":
         L = specimen.span_mm
@@ -282,7 +282,10 @@ class TestParamsCalculator(QDialog):
         e_max   = self._sb_emax.value()
         dro_res = self._sb_dro.value()
 
-        chord_mm = _chord_window_mm(s)
+        import settings as cfg
+        chord_eps1 = float(cfg.get("chord_eps1"))
+        chord_eps2 = float(cfg.get("chord_eps2"))
+        chord_mm = _chord_window_mm(s, chord_eps1, chord_eps2)
         if chord_mm is None:
             self._lbl_window.setText("Enter specimen dimensions to calculate.")
             self._lbl_rec.setText("")
@@ -297,7 +300,7 @@ class TestParamsCalculator(QDialog):
         lpt_max_str = f"{lpt_max:.3f} kg" if lpt_max is not None else "—"
 
         self._lbl_window.setText(
-            f"Chord window (ε {CHORD_EPS_1*100:.2f}%→{CHORD_EPS_2*100:.2f}%):  "
+            f"Chord window (ε {chord_eps1*100:.2f}%→{chord_eps2*100:.2f}%):  "
             f"{chord_mm:.3f} mm  →  {ticks:.1f} DRO ticks  "
             f"(tick count is geometry-only; modulus does not affect it)\n"
             f"Load change per DRO tick:  {lpt_min_str} at {e_min:.1f} GPa  —  "
@@ -340,7 +343,7 @@ class TestParamsCalculator(QDialog):
                 f"⚠  Only {ticks:.1f} tick(s) in chord window regardless of speed — "
                 f"this is set by geometry alone.  "
                 f"Use a longer gauge / span length to get more ticks, or widen the chord "
-                f"bounds (CHORD_EPS_1 / CHORD_EPS_2 in calculations.py).\n"
+                f"bounds in Test Settings (ε {chord_eps1*100:.2f}%→{chord_eps2*100:.2f}%).\n"
                 f"Applying {self._rec_speed} mm/min  ·  {self._rec_interval} ms as best available."
             )
         else:

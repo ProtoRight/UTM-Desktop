@@ -12,6 +12,9 @@ DEFAULTS: dict = {
     "default_sample_interval_ms": 50,  # ms between RUNNING packets (SAMPLERATE command)
     "csv_export_dir": str(Path.home() / "Documents"),
     "load_cell_rating_kg": 500.0,
+    "chord_eps1": 0.0005,
+    "chord_eps2": 0.0025,
+    "chord_standard": "ISO 178",
 }
 
 _path = Path(__file__).parent / "settings.json"

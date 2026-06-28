@@ -114,6 +114,11 @@ class BendResults:
     linear_region_end_mm: Optional[float] = None
     linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
+    chord_eps1_used: float        = 0.0
+    chord_eps2_used: float        = 0.0
+    chord_standard: str           = ""
+    chord_start_disp_mm: Optional[float] = None
+    chord_end_disp_mm: Optional[float]   = None
 
 
 @dataclass
@@ -131,6 +136,11 @@ class TensileResults:
     linear_region_end_mm: Optional[float] = None
     linear_region_slope_kg_per_mm: Optional[float] = None
     notes: list[str] = field(default_factory=list)
+    chord_eps1_used: float        = 0.0
+    chord_eps2_used: float        = 0.0
+    chord_standard: str           = ""
+    chord_start_disp_mm: Optional[float] = None
+    chord_end_disp_mm: Optional[float]   = None
 
 
 # ---------------------------------------------------------------------------
@@ -197,11 +207,39 @@ def offset_to_zero(
     return [(d - d0, f) for d, f in points]
 
 
+def bin_by_displacement(
+    points: list[tuple[float, float]],
+    tolerance_mm: float = 1e-9,
+) -> list[tuple[float, float]]:
+    """Average load for consecutive points sharing the same displacement value.
+
+    The DRO encoder updates less frequently than the load cell is sampled,
+    producing multiple load readings per displacement tick.  Averaging them
+    gives one (displacement, load) pair per DRO increment, which keeps the
+    displacement axis strictly monotonic — required by np.interp in the chord
+    modulus calculation.
+    """
+    if not points:
+        return points
+    result: list[tuple[float, float]] = []
+    group_disp = points[0][0]
+    group_loads = [points[0][1]]
+    for disp, load in points[1:]:
+        if abs(disp - group_disp) <= tolerance_mm:
+            group_loads.append(load)
+        else:
+            result.append((group_disp, sum(group_loads) / len(group_loads)))
+            group_disp = disp
+            group_loads = [load]
+    result.append((group_disp, sum(group_loads) / len(group_loads)))
+    return result
+
+
 def preprocess(
     points: list[tuple[float, float]],
 ) -> list[tuple[float, float]]:
-    """Full preprocessing pipeline: trim errant start → offset to zero."""
-    return offset_to_zero(trim_errant_start(points))
+    """Full preprocessing pipeline: trim errant start → offset to zero → bin by displacement."""
+    return bin_by_displacement(offset_to_zero(trim_errant_start(points)))
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +336,9 @@ def calculate_bend(
     disp_mm: list[float],
     load_kg: list[float],
     specimen: SpecimenData,
+    chord_eps1: float = CHORD_EPS_1,
+    chord_eps2: float = CHORD_EPS_2,
+    chord_standard: str = "",
 ) -> BendResults:
     res = BendResults()
     if not disp_mm or not load_kg:
@@ -342,7 +383,7 @@ def calculate_bend(
     flex_stress  = post_load * G * L * c / (4.0 * I)   # MPa
 
     E_MPa, used_eps2, mod_note = _chord_modulus_mpa(
-        delta_strain, flex_stress, CHORD_EPS_1, CHORD_EPS_2
+        delta_strain, flex_stress, chord_eps1, chord_eps2
     )
     res.notes.append(mod_note)
     if E_MPa is not None and E_MPa > 0:
@@ -353,6 +394,21 @@ def calculate_bend(
         res.linear_region_end_mm          = min(chord_end, res.peak_displacement_mm)
         # dF/dδ [kg/mm] = E_f [N/mm²] × 48I [mm⁴] / (G [N/kg] × L³ [mm³])
         res.linear_region_slope_kg_per_mm = E_MPa * 48.0 * I / (G * L ** 3)
+        res.chord_eps1_used      = chord_eps1
+        res.chord_eps2_used      = chord_eps2
+        res.chord_standard       = chord_standard
+        res.chord_start_disp_mm  = onset_disp + chord_eps1 * L ** 2 / (12.0 * c)
+        res.chord_end_disp_mm    = onset_disp + chord_eps2 * L ** 2 / (12.0 * c)
+        # Warn if very few data points span the chord window
+        chord_pts = int(np.sum(
+            (delta_strain >= chord_eps1) & (delta_strain <= used_eps2)
+        ))
+        if chord_pts < 3:
+            res.notes.append(
+                f"Only {chord_pts} data point(s) within chord window "
+                f"(ε {chord_eps1*100:.2f}%→{used_eps2*100:.2f}%) — "
+                "modulus may be unreliable; use a longer span or wider chord bounds."
+            )
 
     return res
 
@@ -361,6 +417,9 @@ def calculate_tensile(
     disp_mm: list[float],
     load_kg: list[float],
     specimen: SpecimenData,
+    chord_eps1: float = CHORD_EPS_1,
+    chord_eps2: float = CHORD_EPS_2,
+    chord_standard: str = "",
 ) -> TensileResults:
     res = TensileResults()
     if not disp_mm or not load_kg:
@@ -404,7 +463,7 @@ def calculate_tensile(
     eng_stress_post   = post_load * G / A              # MPa
 
     E_MPa, used_eps2, mod_note = _chord_modulus_mpa(
-        delta_strain_post, eng_stress_post, CHORD_EPS_1, CHORD_EPS_2
+        delta_strain_post, eng_stress_post, chord_eps1, chord_eps2
     )
     res.notes.append(mod_note)
     if E_MPa is not None and E_MPa > 0:
@@ -414,6 +473,20 @@ def calculate_tensile(
         chord_end                          = onset_disp + used_eps2 * L0
         res.linear_region_end_mm           = min(chord_end, res.peak_displacement_mm)
         res.linear_region_slope_kg_per_mm  = E_MPa * A / (G * L0)
+        res.chord_eps1_used      = chord_eps1
+        res.chord_eps2_used      = chord_eps2
+        res.chord_standard       = chord_standard
+        res.chord_start_disp_mm  = onset_disp + chord_eps1 * L0
+        res.chord_end_disp_mm    = onset_disp + chord_eps2 * L0
+        chord_pts = int(np.sum(
+            (delta_strain_post >= chord_eps1) & (delta_strain_post <= used_eps2)
+        ))
+        if chord_pts < 3:
+            res.notes.append(
+                f"Only {chord_pts} data point(s) within chord window "
+                f"(ε {chord_eps1*100:.2f}%→{used_eps2*100:.2f}%) — "
+                "modulus may be unreliable; use a longer gauge length or wider chord bounds."
+            )
 
         # 0.2 % offset yield strength (offset from contact onset)
         onset_strain = onset_disp / L0

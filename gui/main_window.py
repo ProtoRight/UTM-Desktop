@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
 
         self._settings = SettingsPanel()
         layout.addWidget(self._settings)
+        self._settings.chord_changed.connect(self._on_chord_settings_changed)
 
         layout.addStretch()
         scroll.setWidget(inner)
@@ -382,11 +383,7 @@ class MainWindow(QMainWindow):
         )
         self._results.enable_recalculate(True)
 
-        # Refresh data editor if it's open
-        if self._data_editor is not None and self._data_editor.isVisible():
-            self._data_editor.load_data(
-                self._clean_disp, self._clean_load, self._excluded_indices
-            )
+        # data editor refresh is handled by _refresh_data_editor() inside _run_calculations
 
         self._graph.clear()
         self._refresh_graph()
@@ -398,17 +395,40 @@ class MainWindow(QMainWindow):
         disp_list: list[float],
         load_list: list[float],
     ) -> None:
+        eps1 = float(cfg.get("chord_eps1"))
+        eps2 = float(cfg.get("chord_eps2"))
+        std  = str(cfg.get("chord_standard"))
         self._last_specimen = specimen
         if is_3pt:
-            r = calculate_bend(disp_list, load_list, specimen)
-            self._last_results = r
+            r = calculate_bend(disp_list, load_list, specimen, eps1, eps2, std)
+        else:
+            r = calculate_tensile(disp_list, load_list, specimen, eps1, eps2, std)
+
+        # Warn if any excluded points fall within the chord window
+        if (self._excluded_indices
+                and r.chord_start_disp_mm is not None
+                and r.chord_end_disp_mm is not None):
+            n_excl_in_window = sum(
+                1 for i in self._excluded_indices
+                if i < len(self._clean_disp)
+                and r.chord_start_disp_mm
+                <= (abs(self._clean_disp[i]) if self._use_absolute else self._clean_disp[i])
+                <= r.chord_end_disp_mm
+            )
+            if n_excl_in_window:
+                r.notes.append(
+                    f"{n_excl_in_window} excluded point(s) fall within the chord window "
+                    f"— modulus interpolation spans larger gaps; accuracy may be reduced."
+                )
+
+        self._last_results = r
+        if is_3pt:
             self._results.set_yield_overlay_available(False)
             self._results.show_bend_results(r)
         else:
-            r = calculate_tensile(disp_list, load_list, specimen)
-            self._last_results = r
             self._results.set_yield_overlay_available(r.yield_strength_MPa is not None)
             self._results.show_tensile_results(r)
+        self._refresh_data_editor()
 
     # ------------------------------------------------------------------
     # Graph refresh (timer — converts to display units)
@@ -474,8 +494,10 @@ class MainWindow(QMainWindow):
         if self._data_editor is None:
             self._data_editor = DataEditorDialog(self)
             self._data_editor.exclusions_changed.connect(self._on_exclusions_changed)
+        onset_d, chord_s, chord_e = self._get_chord_bounds()
         self._data_editor.load_data(
-            self._clean_disp, self._clean_load, self._excluded_indices
+            self._clean_disp, self._clean_load, self._excluded_indices,
+            onset_d, chord_s, chord_e,
         )
         self._data_editor.show()
         self._data_editor.raise_()
@@ -497,6 +519,7 @@ class MainWindow(QMainWindow):
         )
         self._graph.clear()
         self._refresh_graph()
+        self._refresh_data_editor()
 
     def _on_abs_changed(self, checked: bool) -> None:
         """Absolute-value mode toggled — re-run calculations and refresh graph."""
@@ -512,6 +535,7 @@ class MainWindow(QMainWindow):
         )
         self._graph.clear()
         self._refresh_graph()
+        self._refresh_data_editor()
 
     def _to_stress_strain(
         self,
@@ -822,6 +846,25 @@ class MainWindow(QMainWindow):
             writer.writerow(["Geometry", specimen.geometry])
             writer.writerow(["Completion reason", self._test_data.completion_reason or "—"])
             writer.writerow([])
+            writer.writerow(["--- Modulus chord window ---"])
+            r_chord = self._last_results
+            if r_chord is not None and r_chord.chord_eps1_used:
+                std_used = r_chord.chord_standard or "Custom"
+                writer.writerow(["Chord standard", std_used])
+                writer.writerow(["Chord ε₁ (%)", f"{r_chord.chord_eps1_used * 100:.3f}"])
+                writer.writerow(["Chord ε₂ (%)", f"{r_chord.chord_eps2_used * 100:.3f}"])
+                writer.writerow(["Chord window onset (mm)",
+                                  f"{r_chord.linear_region_onset_mm:.4f}"
+                                  if r_chord.linear_region_onset_mm is not None else "—"])
+                writer.writerow(["Chord window start (mm)",
+                                  f"{r_chord.chord_start_disp_mm:.4f}"
+                                  if r_chord.chord_start_disp_mm is not None else "—"])
+                writer.writerow(["Chord window end (mm)",
+                                  f"{r_chord.chord_end_disp_mm:.4f}"
+                                  if r_chord.chord_end_disp_mm is not None else "—"])
+            else:
+                writer.writerow(["Chord standard", "—"])
+            writer.writerow([])
             if specimen.geometry == "rectangular":
                 writer.writerow(["Width b (mm)", specimen.width_mm])
                 writer.writerow(["Thickness d (mm)", specimen.thickness_mm])
@@ -874,27 +917,40 @@ class MainWindow(QMainWindow):
                         "Displacement (mm)", "Load (kg)",
                         "|Displacement| (mm)", "|Load| (kg)",
                         "Flexural Strain (e)", "Flexural Stress (MPa)",
-                        "User Excluded",
+                        "Chord region", "User Excluded",
                     ])
                 else:
                     writer.writerow([
                         "Displacement (mm)", "Load (kg)",
                         "|Displacement| (mm)", "|Load| (kg)",
                         "Engineering Strain (e)", "Engineering Stress (MPa)",
-                        "User Excluded",
+                        "Chord region", "User Excluded",
                     ])
             else:
                 writer.writerow([
                     "Displacement (mm)", "Load (kg)",
                     "|Displacement| (mm)", "|Load| (kg)",
-                    "User Excluded",
+                    "Chord region", "User Excluded",
                 ])
+
+            # Pre-compute chord window bounds for CSV marking
+            _r = self._last_results
+            _chord_onset  = _r.linear_region_onset_mm   if _r else None
+            _chord_start  = _r.chord_start_disp_mm      if _r else None
+            _chord_end    = _r.chord_end_disp_mm        if _r else None
 
             for i, (disp, load) in enumerate(clean_pts):
                 excluded_flag = "Y" if i in self._excluded_indices else ""
                 abs_disp = abs(disp)
                 abs_load = abs(load)
                 F_N_abs  = abs_load * G
+                chord_label = ""
+                if _chord_onset is not None and _chord_start is not None and _chord_end is not None:
+                    d_cmp = abs_disp
+                    if _chord_onset <= d_cmp < _chord_start:
+                        chord_label = "onset"
+                    elif _chord_start <= d_cmp <= _chord_end:
+                        chord_label = "chord"
                 if ss_params and is_3pt:
                     strain = 12.0 * abs_disp * ss_params["c"] / ss_params["L"] ** 2
                     stress = F_N_abs * ss_params["L"] * ss_params["c"] / (4.0 * ss_params["I"])
@@ -902,7 +958,7 @@ class MainWindow(QMainWindow):
                         f"{disp:.4f}", f"{load:.4f}",
                         f"{abs_disp:.4f}", f"{abs_load:.4f}",
                         f"{strain:.6f}", f"{stress:.4f}",
-                        excluded_flag,
+                        chord_label, excluded_flag,
                     ])
                 elif ss_params:
                     strain = abs_disp / ss_params["L0"]
@@ -911,13 +967,13 @@ class MainWindow(QMainWindow):
                         f"{disp:.4f}", f"{load:.4f}",
                         f"{abs_disp:.4f}", f"{abs_load:.4f}",
                         f"{strain:.6f}", f"{stress:.4f}",
-                        excluded_flag,
+                        chord_label, excluded_flag,
                     ])
                 else:
                     writer.writerow([
                         f"{disp:.4f}", f"{load:.4f}",
                         f"{abs_disp:.4f}", f"{abs_load:.4f}",
-                        excluded_flag,
+                        chord_label, excluded_flag,
                     ])
 
         QMessageBox.information(self, "Exported", f"Data saved to:\n{path}")
@@ -944,6 +1000,29 @@ class MainWindow(QMainWindow):
         self._send(f"SAMPLERATE {interval_ms}")
         cfg.set("default_test_speed", speed_mmmin)
         cfg.set("default_sample_interval_ms", interval_ms)
+
+    def _get_chord_bounds(self) -> tuple[float | None, float | None, float | None]:
+        """Return (onset_disp, chord_start_disp, chord_end_disp) in working-space mm."""
+        r = self._last_results
+        if r is None:
+            return None, None, None
+        return r.linear_region_onset_mm, r.chord_start_disp_mm, r.chord_end_disp_mm
+
+    def _refresh_data_editor(self) -> None:
+        """Reload the data editor with current data and chord bounds (if open)."""
+        if self._data_editor is None or not self._data_editor.isVisible():
+            return
+        onset_d, chord_s, chord_e = self._get_chord_bounds()
+        self._data_editor.load_data(
+            self._clean_disp, self._clean_load,
+            self._excluded_indices,
+            onset_d, chord_s, chord_e,
+        )
+
+    def _on_chord_settings_changed(self) -> None:
+        """Chord window changed in settings panel — recalculate immediately if data exists."""
+        if self._clean_disp:
+            self._on_recalculate()
 
     # ==================================================================
     # Close
